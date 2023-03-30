@@ -1,0 +1,454 @@
+sudo dnf install -y qemu-kvm libvirt virt-install bridge-utils - установка всех необходимых пакетов для создания ВМ для кластера
+
+sudo mkdir /mnt/kvm/disk - создание папки для хранения потсоянных томов ВМ
+sudo mkdir /mnt/kvm/iso - создание папки для хранения ISO
+
+sudo qemu-img create -f qcow2 -o preallocation=metadata /mnt/kvm/disk/net9-ssl.qcow2 20G - создание тома для сетевого узла 
+sudo qemu-img create -f qcow2 -o preallocation=metadata /mnt/kvm/disk/comp9-ssl.qcow2 10G - создание тома для рабочего узла
+sudo qemu-img create -f qcow2 -o preallocation=metadata /mnt/kvm/disk/cont9-ssl.qcow2 20G - создание тома для управляющего узла
+sudo qemu-img create -f qcow2 -o preallocation=metadata /mnt/kvm/disk/lvm9-ssl.qcow2 2G - создание тома для lvm-группы (нужна для службы cinder-volume)
+
+cat << EOF >> default.xml
+<network>
+  <name>default</name>
+  <uuid>8299ce68-7dbb-44d1-9230-8be61ef1c033</uuid>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <mac address='52:54:00:df:95:7a'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF - создание файла определения сети ВМ
+
+sudo virsh net-define default.xml - создание дефолтной сети для ВМ на основе ранее созданного файла
+sudo net-autostart default - настройка автозапуска сети при перезагрузки ПК
+
+sudo wget https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-20230313.0-x86_64-boot.iso - скачивание ISO для ОС виртуалок
+sudo mv CentOS-Stream-9-20230313.0-x86_64-boot.iso /mnt/kvm/iso - перенос ISO в специализированную папку
+
+sudo virt-install --name comp9-ssl --os-type linux --os-variant centos-stream9 --location /mnt/kvm/iso/CentOS-Stream-9-20230307.0-x86_64-boot.iso --graphics none --disk /mnt/kvm/disk/comp9-ssl.qcow2,size=10,format=qcow2 --ram 4096 --network network=default --virt-type kvm --arch x86_64 --console pty,target_type=serial --extra-args 'console=ttyS0,115200n8 serial' - создание ВМ для рабочего узла
+
+Во время установки выбрать тип установки из консоли (Use test mode) и настроить следующие параметры:
+Time settings (время) - любое, но чтобы на всех ВМ один часовой пояс
+Language settings (язык) - какой хочется
+Installation source - оставить closest mirror 
+Software detection - самым последним шагом выбрать minimal install и проскипать до главного меню
+Installation Destionation - выбрать диск для установки (обычно один) и дальше проскипать
+Kdump - даже захоть внутрь не надо
+Network configuration - заполнить:
+	set hostname - написать полное имя узла (например рабочий compute.test.local)
+	configure device enp1s0:
+		IPv4 address or "dhcp" for DHCP - написать ip узла (далжен быть внутри сети определенной в настройках сети default (в XML выше это сеть 192.168.122.0/24))
+		IPv4 netmask - написать маску сети 255.255.255.0
+		IPv4 gateway - написать ip типо-роутера (в XML выше это 192.168.122.1)
+		IPv6 - не трогаем
+		Nameservers - написать ip типо-роутера
+		Connect automatically after reboot - должен стоять крестик
+		Apply configuration in installer - должен стоять крестик
+Root Password - заполнить пароль для узла (если говорит, что пароль слишком небезопасный то можно просто написать "y" и пойти дальше)
+User creation - можно создать пользователя (я не создавал)
+
+sudo virt-install --name cont9-ssl --os-type=linux --os-variant centos-stream9 --location /mnt/kvm/iso/CentOS-Stream-9-20230307.0-x86_64-boot.iso --graphics none --disk /mnt/kvm/disk/cont9-ssl.qcow2,size=20,format=qcow2 --ram 8192 --network network=default --virt-type kvm --arch x86_64 --console pty,target_type=serial --extra-args 'console=ttyS0,115200n8 serial' - создание ВМ для управляющего узла
+
+Создание моста в локльную сеть компьютера, для того чтобы ВМ созданные внутри Openstack можно было показать соседям по комнате
+sudo nmcli conn add type bridge con-name br0 ifname br0 - создание подключения для моста
+sudo nmcli conn modify br0 ipv4.addresses '<ip моста в локальной сети>/24' - выдача постоянного ip подключению
+sudo nmcli conn modify br0 ipv4.gateway '<ip роутера в локальной сети>' - настройка ip роутера в локальной сети
+sudo nmcli conn modify br0 ipv4.dns '<ip роутера в локальной сети>' - настройка ip DNS сервера в локальной сети
+sudo nmcli conn modify br0 ipv4.method manual - настройка постоянного ip (по дефолту DHCP)
+sudo ip a - найти название ethernet интерфейса через которое будет пробрасываться мост (eth* или enp*)
+sudo nmcli conn add type ethernet slave-type bridge con-name bridge-br0 ifname <имя ethernet интерфейса> master br0 - создание подключения связывающего eternet интерфейс с мостом
+sudo nmcli conn up br0 - поднятие моста
+sudo nmcli conn show | grep ethernet - вывод имени подключения которое нужно вырубить 
+sudo nmcli conn down <имя подключения> - выключение бывщего ethernet подключения
+sudo nmcli conn show  --active - проверка
+
+sudo virt-install --name net9-ssl --os-type linux --os-variant centos-stream9 --location /mnt/kvm/iso/CentOS-Stream-9-20230307.0-x86_64-boot.iso --graphics none --disk /mnt/kvm/disk/net9-ssl.qcow2,size=20,format=qcow2 --disk /mnt/kvm/disk/lvm19-ssl.qcow2,size=2,format=qcow2 --disk /mnt/kvm/disk/lvm29-ssl.qcow2,size=2,format=qcow2 --ram 8192 --network network=default --network bridge=br0,model=virtio --virt-type kvm --arch x86_64 --console pty,target_type=serial --extra-args 'console=ttyS0,115200n8 serial'
+- создание ВМ для сетевого узла 
+
+Удаление созданного моста (если захочется)
+sudo nmcli conn up <имя подключения> - поднятие бывшего ethernet подключения
+sudo nmcli conn down br0 - выключение моста
+sudo nmcli conn del br0 - удаление моста
+sudo nmcli conn del bridge-br0 - удаление связи моста с ethernet подключением
+
+Команды для управления ВМ
+sudo virsh snapshot-create-as --domain cont9-ssl --name "basis" - создание снимка ВМ
+sudo virsh snapshot-revert --domain cont9-ssl --snapshotname basis - откат ВМ к снимку
+sudo virsh list --all - список всех ВМ даже не работающих
+sudo virsh net-list --all - список всех сетей даже не работающих
+sudo virsh dumpxml --domain cont9-ssl - вывод XML файла описывающего ВМ
+sudo virsh net-dumpxml --network default - вывод XML файла описывающего сеть
+sudo virsh snapshot-list --domain cont9-ssl - вывод всех снимков ВМ
+sudo virsh sutdown --domain cont9-ssl - отправление сигнала ВМ "пожалуйста выключись"
+sudo virsh start --domain cont9-ssl - запуск ВМ
+sudo virsh console --domain cont9-ssl - подключение к консоли ВМ
+sudo virsh destroy --domain cont9-ssl - выключение ВМ aka выдергивание из розетки
+sudo virsh undefine --domain cont9-ssl - удаление ВМ (том сохраняется)
+sudo virsh snapshot-delete --domain cont9-ssl --snapshotname basis - удаление снимка ВМ  
+sudo virsh net-destroy default - выключение сети
+sudo virsh net-undefine --network default - удаление сети
+sudo virsh edit --domain cont9-ssl - редактирование XML файла описывающего ВМ (только так, а то изменения не применятся)
+sudo virsh net-edit --network cont9-ssl - реадктирование XML файла описывающего сеть (только так, а то изменения не применятся)
+sudo virsh attach-interface --domain cont9-ssl --type network --source defaul --model virtio --persistent - присоединение сетевого интерфейса типа network к ВМ (навсегда)
+sudo virsh attach-interface --domain cont9 --type bridge --source br0 --model virtio --persistent - присоединение сетевого интерфейса типа bridge к ВМ (навсегда)
+sudo virsh detach-interface --domain cont9-ssl --mac 52:54:00:37:2c:d8 --type network --persistent - удаление сетевого интерфейса ВМ
+sudo qemu-img resize /mnt/kvm/disk/cont9.qcow2 +2G - расширение тома ВМ
+sudo virsh attach-disk --domain cont9-ssl --source /mnt/kvm/disk/lvm9-ssl.qcow2 --target vdb --persistent - присоединение тома (диска) к ВМ (навсегда)
+sudo virsh detach-disk --domain cont9-ssl --target vdb --persistent - отсоединение тома (диска) от ВМ
+sudo virt-clone --original cont9-ssl --auto-clone - клонирование ВМ
+
+Также, если в консоли ВМ всякие визуальные баги (например перенос на ту же самую строку), то можно установить пакет xterm (dnf -y install xterm) и использовать команду resize, когда размер окна терминала меняется.
+
+Проверка:
+
+su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+
+wget https://download.cirros-cloud.net/0.6.1/cirros-0.6.1-x86_64-disk.img
+openstack image create "Cirros" --file cirros-0.6.1-x86_64-disk.img --disk-format qcow2 --container-format bare --public 
+openstack image list
+
+openstack project create --domain default --description "Demo Project" demo
+openstack project list
+openstack user create --domain default --project demo --password demo demo
+openstack user list
+openstack role create CloudUser
+openstack role list
+openstack role add --project demo --user demo CloudUser
+openstack user show demo
+openstack flavor create --id 0 --vcpus 1 --ram 300 --disk 2 m1.small
+openstack flavor list
+
+openstack router create router01
+openstack router list
+openstack network create private --provider-network-type vxlan
+openstack subnet create private-subnet --network private --subnet-range 192.168.100.0/24 --gateway 192.168.100.1
+openstack router add subnet router01 private-subnet
+
+openstack network create --provider-physical-network external --provider-network-type flat --external public
+openstack network list
+openstack subnet create public-subnet --network public --subnet-range 192.168.122.0/24 --allocation-pool start=192.168.122.200,end=192.168.122.254 --gateway 192.168.122.1 --no-dhcp
+openstack subnet list
+openstack router set router01 --external-gateway public
+openstack router show router01
+
+openstack security group create secgroup01
+openstack security group list
+ssh-keygen -q -N ""
+openstack keypair create --public-key ~/.ssh/id_rsa.pub mykey
+openstack keypair list
+
+openstack server create --flavor m1.small --image Cirros --security-group secgroup01 --nic net-id=private --key-name mykey Cirros
+openstack server list
+
+openstack floating ip create public
+openstack server add floating ip Cirros 192.168.122.204
+openstack floating ip list
+openstack server list
+
+openstack security group rule create --protocol icmp --ingress secgroup01
+openstack security group rule create --protocol tcp --dst-port 22:22 secgroup01
+openstack security group rule list secgroup01
+
+openstack console url show Cirros
+ssh cirros@192.168.122.204
+
+openstack volume create --size 2 disk01
+openstack volume list
+openstack server add volume Cirros disk01
+openstack volume list
+openstack server remove volume Cirros disk01
+openstack volume list
+
+
+openstack volume backup create --name bk-disk01 disk01
+openstack volume backup list
+openstack volume backup create --name bk-disk01-01 --incremental --force disk01
+openstack volume backup list
+openstack volume backup restore bk-disk01-01 disk01_restored
+openstack volume list
+
+cat << EOF >>sample-stack.yml
+heat_template_version: 2021-04-16
+description: Heat Sample Template
+
+parameters:
+  ImageID:
+    type: string
+    description: Image used to boot a server
+  NetID:
+    type: string
+    description: Network ID for the server
+
+resources:
+  server1:
+    type: OS::Nova::Server
+    properties:
+      name: "Heat_Deployed_Server"
+      image: { get_param: ImageID }
+      flavor: "m1.small"
+      networks:
+      - network: { get_param: NetID }
+
+outputs:
+  server1_private_ip:
+    description: IP address of the server in the private network
+    value: { get_attr: [ server1, first_address ] }
+EOF
+openstack stack create -t sample-stack.yml --parameter "ImageID=Cirros;NetID=private" Sample-Stack --insecure
+openstack stack list --insecure
+openstack server list
+penstack stack delete --yes Sample-Stack --insecure
+openstack stack list --insecure
+openstack server list
+
+openstack role add --project demo --user demo heat_stack_owner
+openstack user show demo
+
+openstack secret store --name secret01 --payload secretkey
+openstack secret list
+openstack secret get http://controller.test.local:9311/v1/secrets/d97781d1-6630-4a73-9db8-64be4355f937
+openstack secret get http://controller.test.local:9311/v1/secrets/d97781d1-6630-4a73-9db8-64be4355f937 --payload 
+
+openstack secret order create --name secret02 --algorithm aes --bit-length 256 --mode cbc --payload-content-type application/octet-stream key
+openstack secret order list
+openstack secret order get http://controller.test.local:9311/v1/orders/7797df74-37e2-4d2b-8b81-4a8552795449
+openstack secret get http://controller.test.local:9311/v1/secrets/d4b25add-dfd7-4bb5-9571-2ae055709457
+
+manila --insecure type-create default_share_type False
+manila --insecure type-list
+
+manila --insecure create NFS 1 --name share01 --share-type default_share_type
+manila --insecure list
+
+manila --insecure access-allow share01 ip 192.168.122.0/24 --access-level rw
+manila --insecure access-list share01
+
+manila --insecure show share01
+
+sudo mount -t nfs 192.168.122.22:/var/lib/manila/mnt/share-af0fd935-b226-4dff-9b54-a6b5d81985eb /mnt
+#на управляющем
+echo "manila write test" > /mnt/testfile.txt
+#на узле хранения
+cat /var/lib/manila/mnt/share-af0fd935-b226-4dff-9b54-a6b5d81985eb/testfile.txt
+
+openstack zone create --email dnsmaster@server.education server.education. --insecure
+openstack zone list --insecure
+openstack recordset create --record '192.168.100.10' --type A server.education. node01 --insecure
+openstack recordset list server.education. --insecure
+
+dnf -y install bind-utils
+dig -p 5354 @network.test.local node01.server.education.
+
+openstack recordset delete server.education. node01.server.education. --insecure
+openstack recordset list server.education. --insecure
+openstack zone delete server.education. --insecure
+openstack zone list --insecure
+
+openstack image list
+openstack flavor list --all 
+openstack network list 
+openstack security group list
+#На сетевом
+#crudini --set /etc/octavia/octavia.conf controller_worker client_ca /etc/octavia/certs/client_ca.cert.pem
+crudini --set /etc/octavia/octavia.conf controller_worker amp_image_tag Amphora
+crudini --set /etc/octavia/octavia.conf controller_worker amp_flavor_id 100
+crudini --set /etc/octavia/octavia.conf controller_worker amp_secgroup_list d648017a-b526-45c8-81e2-e96d45fe87b4
+crudini --set /etc/octavia/octavia.conf controller_worker amp_boot_network_list 38daf85d-9e69-45fd-9e16-576be57b53ad
+crudini --set /etc/octavia/octavia.conf controller_worker network_driver allowed_address_pairs_driver
+crudini --set /etc/octavia/octavia.conf controller_worker amphora_driver amphora_haproxy_rest_driver 
+crudini --set /etc/octavia/octavia.conf controller_worker compute_driver compute_nova_driver
+systemctl restart octavia-api octavia-health-manager octavia-housekeeping octavia-worker
+#На управляющем
+openstack loadbalancer create --name lb01 --vip-subnet-id private-subnet --insecure
+openstack loadbalancer list --insecure
+openstack loadbalancer pool create --name pool01 --lb-algorithm ROUND_ROBIN --listener listener01 --protocol TCP --insecure
+openstack server list
+openstack loadbalancer member create --subnet-id private-subnet --address 192.168.100.244 --protocol-port 80 pool01 --insecure
+openstack loadbalancer member list pool01 --insecure
+openstack floating ip create public 
+openstack loadbalancer show lb01 --insecure
+openstack floating ip set --port 44a10edb-0494-4a02-997e-f6cfc1f13482 192.168.122.210
+curl 192.168.122.210
+
+wget https://builds.coreos.fedoraproject.org/prod/streams/stable/builds/35.20220424.3.0/x86_64/fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2.xz
+xz -dv fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2.xz
+openstack image create Fedora-CoreOS --file=fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2 --disk-format=qcow2 --container-format=bare --property os_distro='fedora-coreos' --public
+openstack coe cluster template create k8s-cluster-template --image Fedora-CoreOS --external-network public --fixed-network private --fixed-subnet private-subnet --network-driver calico --docker-storage-driver overlay2 --docker-volume-size 1 --master-flavor m1.small --flavor m1.small --coe kubernetes --insecure
+openstack coe cluster create k8s-cluster --cluster-template k8s-cluster-template --master-count 1 --node-count 1 --keypair mykey
+openstack coe cluster list --insecure
+openstack stack list --insecure
+openstack stack list --nested --insecure | grep k8s-cluster
+openstack server list
+
+snap install kubectl --classic
+openstack coe cluster list --insecure
+openstack coe cluster config k8s-cluster --insecure
+export KUBECONFIG=/root/config
+kubectl get nodes
+kubectl get pods -n kube-system
+kubectl create deployment test-nginx --image=nginx --replicas=2 
+kubectl get pods -o wide 
+kubectl expose deployment test-nginx --type="NodePort" --port 80
+kubectl get services test-nginx 
+kubectl port-forward service/test-nginx --address 0.0.0.0 10443:80 &
+curl localhost:10443
+
+rally task start boot-and-delete.json
+rally task report 037125a3-656a-401d-8c71-6de2b9e300a9 --out output.html
+
+openstack metric resource list --insecure
+openstack metric resource show ce9e12dc-91b4-4c83-ba1a-4205b88d677c --insecure
+openstack metric measures show 27cb9cc9-398f-4584-b32e-949234166d08 --insecure
+openstack metric measures show 3483563c-33be-4569-a80b-77b7b61c12f8 --insecure
+openstack metric measures show 3c1064e9-c20e-4db0-a5bb-5ba87a7b2464 --insecure
+openstack metric measures show 1b2b6a1a-7aec-4b71-8a1d-b1ba5aaea428 --insecure
+
+
+openstack role add --user cloudkitty --project admin rating
+openstack rating module list --insecure
+openstack rating module enable hashmap --insecure
+openstack rating module list --insecure
+openstack rating hashmap service create instance --insecure
+openstack rating hashmap field create f1e31e05-46a4-4152-ae39-d74afa7168be flavor_id --insecure
+openstack flavor list
+openstack rating hashmap mapping create 0.5 --field-id fcfb9e25-7a33-4fa0-ab13-ed0d3de060c6 --value 0 -t flat --insecure
+openstack server list
+openstack server start Cirros
+openstack rating summary get --insecure
+openstack rating hashmap service create volume.size --insecure
+openstack rating hashmap mapping create 1.5 -s 6fcc36ea-7937-4342-8fd9-91ecac74b16b -t flat --insecure
+openstack rating hashmap threshold create 5 0.90 -s 6fcc36ea-7937-4342-8fd9-91ecac74b16b -t rate --insecure
+openstack rating summary get --insecure
+openstack volume create --size 2 disk0
+openstack volume list
+openstack rating summary get --insecure
+openstack rating dataframes get --insecure
+openstack volume create --size 5 disk0
+openstack volume list
+openstack rating summary get --insecure
+openstack rating dataframes get --insecure
+
+
+
+dnf -y install net-tools - установка пакета для netstat
+netstat -pnltu - вывод всех портов
+dnf -y install setroubleshoot-server - установка пакета для sealert
+rabbitmqctl authenticate_user octavia octavia - проверка наличия пользователя в RabbitMQ
+df -h - информация по дисками и смонтированным папкам
+free -h - информация по использованию RAM
+cat /var/log/audit/audit.log | grep -i avc - ошибки связанные с SELinux
+cat /etc/hosts - файл с маппингом имен узлов к их IP
+cat /etc/fstab - файл с настойками монтирования папок (nfs клиенты)
+cat /etc/exports - файл с настройками экспорта папок (nfs сервер)
+journalctl -xe - вывод общей инфы об ошибках (в основном бесполезная, надо смотреть логи)
+systemctl status <имя сервиса>- вывод статуса сервиса
+semanage port -l - список настроек SELinux касательно портов
+cat /var/spool/mail/root - файл с сообщениями об ошибках
+getenforce - получение режима SELinux
+setenforce 0 - перевод SELinux в режим не настроенный доступ не блокирую но логирую 
+setenforce 1 - перевод SELinux в режим не настроенный доступ блокирую и логирую 
+cat /etc/sysconfig/iptables - файл с настройками iptables
+cat /etc/sysconfig/nfs - файл с настройкми nfs
+getsebool -a - получение параметров SELinux
+systemctl list-units --type=service - вывод списка всех запущенных сервисов
+sealert -a /var/log/audit/audit.log - анализ ошибок SELinux и предложение решения
+sysctl -a - послечение переменных sysconf
+cat <путь к конфигу> | grep -v "#" | grep "=" - вывод всех заполненных параметров конфига
+tail -10 <путь к файлу логов> - последние 10 строчек логов
+sudo ovs-vsctl show - информация об OpenvSwitch
+lvs - информация по томам cinder
+firewall-cmd --list-all - информация по firewalld
+dnf repolist - список добавленных репозиториев
+rabbitmqctl status - информация о RabbitMQ
+
+/var/log/httpd/keystone.log - логи keystone связанные httpd (узел управления)
+/var/log/httpd/keystone_access.log - логи связанные с запросами к API keystone (узел управления)
+
+/var/log/glance/glance-api.log - логи связанные с glance-api (узел управления)
+/var/log/glance/glance-manage.log - логи связанные с glance-manage (узел управления)
+
+/var/log/cinder/api.log - логи связанные с cinder-api (узел управления)
+/var/log/cinder/backup.log - логи связанные с cinder-backup (узел хранения)
+/var/log/cinder/scheduler.log - логи связанные с cinder-sceduler (узел управления)
+/var/log/cinder/volume.log - логи связанные с cinder-manage (узел хранения)
+/var/log/cinder/privsep-helper.log - логи связанные с privsep-helper (узел хранения)
+
+/var/log/nova/nova-api.log - логи связанные с nova-api (узел управления)
+/var/log/nova/nova-conductor.log - логи связанные с nova-conductor (узел управления)
+/var/log/nova/nova-manage.log - логи связанные с nova-manage (узел управления)
+/var/log/nova/nova-novncproxy.log - логи связанные с nova-novncproxy (узел управления)
+/var/log/nova/nova-scheduler.log - логи связанные с nova-scheduler (узел управления)
+/var/log/nova/nova-compute.log - логи связанные с nova-compute (рабочий узел)
+
+/var/log/neutron/server.log - логи связанные с neutron-server (узел управления)
+/var/log/neutron/dhcp-agent.log - логи связанные с neutron-dhcp-agent (сетевой узел)
+/var/log/neutron/l3-agent.log - логи связанные с neutron-l3-agent (сетевой узел)
+/var/log/neutron/metadata-agent.log - логи связанные с neutron-metadata-agent (узел управления и сетевой)
+/var/log/neutron/openvswitch-agent.log - логи связанные с neutron-openvswitch-agent (сетевой и рабочий узел)
+
+/var/log/httpd/error_log - логи horizon связанные с httpd (узел управления)
+/var/log/httpd/access_log - логи horizon связанные с httpd (узел управления)
+
+/var/log/ceilometer/compute.log - логи связанные с ceilometer-compute (рабочий узел)
+/var/log/ceilometer/agent-notification.log - логи связанные с ceilometer-agent-notification (сетевой узел)
+/var/log/ceilometer/central.log - логи связанные с ceilometer-central (сетевой узел)
+
+/var/log/gnocchi/gnocchi-api.log - логи связанные с gnocchi-api (сетевой узел) 
+/var/log/gnocchi/metricd.log - логи связанные с gnocchi-metricd (сетевой узел)
+/var/log/httpd/gnocchi_wsgi_error.log - логи связанные с ошибками в gnocchi-wsgi (сетевой узел) 
+/var/log/httpd/gnocchi_wsgi_access.log - логи связанные с доступом к gnocchi-wsgi (сетевой узел) 
+
+/var/log/heat/heat-api-cfn.log - логи связанные с heat-api-cfn (сетевой узел) 
+/var/log/heat/heat-api.log - логи связанные с heat-api (сетевой узел) 
+/var/log/heat/heat-engine.log - логи связанные с heat-engine (сетевой узел) 
+
+/var/log/magnum/magnum-api.log - логи связанные с magnum-api (сетевой узел) 
+/var/log/magnum/magnum-conductor.log - логи связанные с magnum-conductor (сетевой узел) 
+
+/var/log/octavia/api.log - логи связанные с octavia-api (сетевой узел) 
+/var/log/octavia/health-manager.log - логи связанные с octavia-health-manager (сетевой узел) 
+/var/log/octavia/housekeeping.log - логи связанные с octavia-housekeeping (сетевой узел) 
+/var/log/octavia/worker.log - логи связанные с octavia-worker (сетевой узел) 
+
+/var/log/designate/api.log - логи связанные с designate-api (сетевой узел) 
+/var/log/designate/central.log - логи связанные с designate-central (сетевой узел) 
+/var/log/designate/designate-manage.log - логи связанные с designate-manage (сетевой узел) 
+/var/log/designate/mdns.log - логи связанные с designate-mdns (сетевой узел) 
+/var/log/designate/producer.log - логи связанные с designate-producer (сетевой узел) 
+/var/log/designate/worker.log - логи связанные с designate-worker (сетевой узел) 
+
+/var/log/cloudkitty/cloudkitty-api.log - логи связанные с cloudkitty-api (сетевой узел) 
+/var/log/cloudkitty/cloudkitty-storage-init.log - логи связанные с cloudkitty-storage-init (сетевой узел) 
+/var/log/cloudkitty/cloudkitty-dbsync.log - логи связанные с cloudkitty-dbsync (сетевой узел) 
+/var/log/cloudkitty/processor.log - логи связанные с cloudkitty-processor (сетевой узел)
+/var/log/httpd/cloudkitty_wsgi_access.log - логи связанные с ошибками в cloudkitty-wsgi (сетевой узел) 
+/var/log/httpd/cloudkitty_wsgi_error.log - логи связанные с доступом к cloudkitty-wsgi (сетевой узел) 
+
+/var/log/rally/rally.log - логи связанные с rally (узел управления)
+
+/var/log/rabbitmq/rabbit@controller.test.local.log - логи связанные с RabbitMQ (узел управления)
+/var/log/rabbitmq/rabbit@controller.test.local_upgrade.log - логи связанные с изменением кластера RabbitMQ (узел управления)
+
+/var/log/nginx/nginx.log - логи связанные с nginx (узел управления и сетевой)
+
+/var/log/placement/placement-api.log - логи связанные с placement (узел управления)
+
+/var/log/aodh/evaluator.log - логи связанные с aodh-evaluator (сетевой узел) 
+/var/log/aodh/listener.log - логи связанные с aodh-listener (сетевой узел) 
+/var/log/aodh/notifier.log - логи связанные с aodh-notifier (сетевой узел)
+/var/log/httpd/aodh_access.log - логи связанные с ошибками в aodh-wsgi (сетевой узел) 
+/var/log/httpd/aodh_error.log - логи связанные с доступом к aodh-wsgi (сетевой узел) 
+
+/var/log/barbican/api.log - логи связанные с barbican (узел управления)
+
+/var/log/manila/api.log - логи связанные с manila-api (узел управления)
+/var/log/manila/scheduler.log - логи связанные с manila-scheduler (узел управления)
+/var/log/manila/share.log - логи связанные с manila-share (узел хранения)
+
+/var/log/mariadb/mariadb.log - логи связанные с mariadb (узел управления)
+
+/var/log/libvirt/qemu/ - папка с логами ВМ (рабочий узел)

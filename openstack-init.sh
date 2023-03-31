@@ -2353,7 +2353,7 @@ openstack domain create --description "Stack Projects and Users" heat
 
 echo "Создание пользователя heat_domain_admin в домене heat"
 
-openstack user create --domain heat --password openstack heat_domain_admin
+openstack user create --domain heat --password $HEAT_PASS heat_domain_admin
 
 echo "Присваивание пользователю heat_domain_admin роли admin в домене heat"
 

@@ -277,7 +277,8 @@ curl 192.168.122.210
 wget https://builds.coreos.fedoraproject.org/prod/streams/stable/builds/35.20220424.3.0/x86_64/fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2.xz
 xz -dv fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2.xz
 openstack image create Fedora-CoreOS --file=fedora-coreos-35.20220424.3.0-openstack.x86_64.qcow2 --disk-format=qcow2 --container-format=bare --property os_distro='fedora-coreos' --public
-openstack coe cluster template create k8s-cluster-template --image Fedora-CoreOS --external-network public --fixed-network private --fixed-subnet private-subnet --network-driver calico --docker-storage-driver overlay2 --docker-volume-size 1 --master-flavor m1.small --flavor m1.small --coe kubernetes --insecure
+openstack flavor create --id 10 --vcpus 1 --ram 1024 --disk 10 m1.kube
+openstack coe cluster template create k8s-cluster-template --image Fedora-CoreOS --external-network public --fixed-network private --fixed-subnet private-subnet --network-driver calico --docker-storage-driver overlay2 --docker-volume-size 1 --master-flavor m1.kube --flavor m1.kube --coe kubernetes --insecure
 openstack coe cluster create k8s-cluster --cluster-template k8s-cluster-template --master-count 1 --node-count 1 --keypair mykey
 openstack coe cluster list --insecure
 openstack stack list --insecure

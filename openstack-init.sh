@@ -1429,7 +1429,7 @@ crudini --set /etc/nova/nova.conf neutron project_name service
 crudini --set /etc/nova/nova.conf neutron username neutron
 crudini --set /etc/nova/nova.conf neutron password $NEUTRON_PASS
 crudini --set /etc/nova/nova.conf neutron service_metadata_proxy true
-crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret metadata_secret
+crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret $METADATA_SECRET
 crudini --set /etc/nova/nova.conf neutron insecure true
 
 echo "Редактирование конфига /etc/neutron/plugins/ml2/openvswitch_agent.ini"

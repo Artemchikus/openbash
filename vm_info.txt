@@ -358,7 +358,7 @@ getsebool -a - получение параметров SELinux
 systemctl list-units --type=service - вывод списка всех запущенных сервисов
 sealert -a /var/log/audit/audit.log - анализ ошибок SELinux и предложение решения
 sysctl -a - послечение переменных sysconf
-cat <путь к конфигу> | grep -v "#" | grep "=" - вывод всех заполненных параметров конфига
+cat /etc/octavia/octavia.conf | grep -v "#" | grep -v -e '^$' - вывод всех заполненных параметров конфига
 tail -10 <путь к файлу логов> - последние 10 строчек логов
 sudo ovs-vsctl show - информация об OpenvSwitch
 lvs - информация по томам cinder

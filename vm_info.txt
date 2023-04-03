@@ -107,6 +107,7 @@ sudo virt-clone --original cont9-ssl --auto-clone - клонирование В�
 
 su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
 
+dnf install -y wget
 wget https://download.cirros-cloud.net/0.6.1/cirros-0.6.1-x86_64-disk.img
 openstack image create "Cirros" --file cirros-0.6.1-x86_64-disk.img --disk-format qcow2 --container-format bare --public 
 openstack image list

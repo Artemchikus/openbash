@@ -14,6 +14,7 @@ METADATA_SECRET=""
 DB_PASS=""
 CINDER_PASS=""
 NOVA_IP=""
+NEUTRON_IP=""
 HOST_IP=""
 NFS_HOSTNAME=""
 TIME_ZONE=""
@@ -35,6 +36,7 @@ MAGNUM_HOSTNAME=""
 RALLY_PASS=""
 KITTY_PASS=""
 KITTY_HOSTNAME=""
+NOVA_IP=""
 DNS=""
 HOSTNAME=""
 HOST_NETWORK=""
@@ -103,6 +105,8 @@ values_menu=(
 "Имя узла, на котором находится сервис CloudKitty"
 ""
 "Имя узла в формате [<controller>.>test>.<local>]"
+""
+"IP адрес узла на котром находится neutron-server"
 ""
 )
 
@@ -335,23 +339,23 @@ cat << EOF
                 |                                   |                               |
           enp1s0|192.168.122.20               enp1s0|192.168.122.22           enp1s0|192.168.122.21
 +---------------+---------------+     +-------------+------------+     +------------+-----------+
-|   [ controller.test.local ]   |     | [ network.test.local ]   |     | [ compute.test.local ] |
-|        (Control Node)         |     |     (Network Node)       |     |     (Compute Node)     |
+|   [ controller.test.local ]   |     |  [ network.test.local ]  |     | [ compute.test.local ] |
+|        (Control Node)         |     |      (Network Node)      |     |     (Compute Node)     |
 |                               |     |                          |     |                        |
 |  MariaDB      RabbitMQ        |     |       Open vSwitch       |     |        Libvirt         |
-|  Memcached    Nginx           |     |     Neutron Metadata     |     |      Nova Compute      |
-|  Keystone     httpd           |     |    Neutron L2/L3 Agent   |     |      Open vSwitch      |
-|  Glance       Nova API        |     |   Nginx   iSCSI Target   |     |   Neutron L2 Agent     |
-|  Cinder API   Horizon         |     |   Cinder Volume/Backup   |     |       NFS Server       |
+|  Memcached    Nginx           |     |      Neutron Server      |     |      Nova Compute      |
+|  Keystone     httpd           |     |        OVN-Northd        |     |      Open vSwitch      |
+|  Glance       Nova API        |     |   Nginx   iSCSI Target   |     |   OVN Metadata Agent   |
+|  Cinder API   Horizon         |     |   Cinder Volume/Backup   |     |     OVN-Controller     |
 |  Rally        Barbican API    |     |  httpd  Magnum Services  |     |   Ceilometer Compute   |
-|  Manila API   Neutron Server  |     |  Gnocchi   Manila Share  |     |                        |             
-|       Neutron Metadata        |     |   CloudKitty API  Aodh   |     |                        |
+|  Manila API                   |     |  Gnocchi   Manila Share  |     |       NFS Server       |             
+|                               |     |   CloudKitty API  Aodh   |     |                        |
 |                               |     |      Heat API/Engine     |     |                        |
 |                               |     |     Octavia Services     |     |                        |
 |                               |     |    Designate Services    |     |                        |
 |                               |     |    Ceilometer Central    |     |                        |
-+-------------------------------+     +-------------+------------+     +------------------------+
-                                              enp2s0|(bridge)
++-------------------------------+     +-------------+------------+     +------------+-----------+
+                                              enp2s0|(bridge)                 enp2s0|(bridge)
 EOF
 read -p "c (продолжить), q (выйти): " choice
     
@@ -497,6 +501,8 @@ values_menu[15]="1" #PLACEMENT_PASS
 elif [[ "$service_choose" == "13" ]]; then
 #neutron-values
 values_menu[9]="1" #NEUTRON_PASS
+values_menu[65]="1" #NEUTRON_IP
+values_menu[17]="1" #METADATA_SECRET
 elif [[ "$service_choose" == "19" ]]; then
 #telemetry-values
 values_menu[31]="1" #CEILOMETER_PASS
@@ -604,14 +610,13 @@ function display_menu() {
 function start_deploy() {
 
 fill_envs
+check
 
 read -p "Начать загрузку? (y/n)" choice
-    
     if ! [[ "$choice" =~ ^y$|^n$ ]]; then
 	echo "Неправильный ввод: $choice"
 	sleep 2
     elif [ "$choice" == "y" ]; then
-        #check
         check_node
         setup_steps
     elif [ "$choice" == "n" ]; then
@@ -695,6 +700,11 @@ if [[ "${values_menu[61]}" ]]; then
 KITTY_HOSTNAME="${values_menu[61]}"
 else
 KITTY_HOSTNAME="$HOSTNAME"
+fi
+if [[ "${values_menu[65]}" ]]; then
+NEUTRON_IP="${values_menu[65]}"
+else
+NEUTRON_IP="$HOST_IP"
 fi
 }
 
@@ -800,6 +810,20 @@ echo "Узел поддерживает аппаратную виртуализ�
 else
 echo "Для рабочего узла желательно аппаратная поддержка виртуализации (настройка через quemu в скрипте не предусмотрена)"
 exit 1
+fi
+
+if [[ "${service_menu[13]}" == "1" ]]; then
+
+echo "Проверка наличия двух сетевых интерфейсов (enp1s0 и enp*s0)"
+
+ETH=$(ip a | grep -E "enp[0-9]s0:" | wc -l)
+if [ "$ETH" -ge "2" ]; then
+echo "Оба сетевых интерфейса присутствуют"
+else
+echo "У сетевого узла должны быть два сетевых интерфейса (enp1s0 и enp*s0)"
+exit 1
+fi
+
 fi
 }
 
@@ -1096,6 +1120,7 @@ echo "KITTY_HOSTNAME=$KITTY_HOSTNAME"
 echo "DNS=$DNS"
 echo "HOSTNAME=$HOSTNAME"
 echo "HOST_NETWORK=$HOST_NETWORK"
+echo "NEUTRON_IP=$NEUTRON_IP"
 }
 
 display_menu

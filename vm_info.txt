@@ -125,7 +125,7 @@ openstack flavor list
 
 openstack router create router01
 openstack router list
-openstack network create private --provider-network-type vxlan
+openstack network create private --provider-network-type geneve
 openstack subnet create private-subnet --network private --subnet-range 192.168.100.0/24 --gateway 192.168.100.1
 openstack router add subnet router01 private-subnet
 

@@ -7,6 +7,7 @@ HOST_NETWORK=""
 DNS=""
 
 NOVA_IP="192.168.122.20"
+NEUTRON_IP="192.168.122.22"
 NEUTRON_PASS="neutron"
 ADMIN_PASS="openstack"
 DB_PASS="mariadb"
@@ -31,7 +32,7 @@ TROVE_PASS="trove"
 METADATA_SECRET="openstack"
 TIME_ZONE=""
 GNOCCHI_HOSTNAME="network.test.local"
-BACKUP_HOSTNAME="network.test.local"
+NFS_HOSTNAME="network.test.local"
 HOSTNAME="controller.test.local"
 NOVA_HOSTNAME="controller.test.local"
 AODH_HOSTNAME="network.test.local"
@@ -45,11 +46,9 @@ TROVE_HOSTNAME="network.test.local"
 
 
 
+function node_init_config() {
 
 echo "Установка Openstack Zed на Centos Stream 9"
-
-
-function node_init_config() {
 
 echo -e "\033[1mПОДГОТОВКА УЗЛА\033[0m"
 
@@ -110,6 +109,7 @@ dnf --enablerepo=epel,epel-next -y install crudini
 }
 
 
+
 function mariadb_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА MariaDB\033[0m"
@@ -125,7 +125,7 @@ echo "[mysqld]"
 echo "character-set-server = utf8mb4"
 echo "[client]"
 echo "default-character-set = utf8mb4"
-} >> /etc/my.cnf.d/charset.cnf
+} > /etc/my.cnf.d/charset.cnf
 
 echo "Добавление Chrony в исключения firewall"
 
@@ -154,6 +154,7 @@ echo "Изменение пароля root для MySQL"
 
 mysql --user="root" --execute="ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASS';"
 }
+
 
 
 function rabbitmq_config() {
@@ -219,6 +220,8 @@ firewall-cmd --runtime-to-permanent
 }
 
 
+
+
 function memcached_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Memcached\033[0m"
@@ -242,46 +245,6 @@ firewall-cmd --runtime-to-permanent
 }
 
 
-function nginx_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Nginx\033[0m"
-
-echo "Установка nginx-mod-stream"
-
-dnf -y install nginx-mod-stream
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.org
-cat << EOF > /etc/nginx/nginx.conf 
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /run/nginx.pid;
-include /usr/share/nginx/modules/*.conf;
-events {
-    worker_connections 1024;
-}
-http {
-    log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                      '\$status \$body_bytes_sent "\$http_referer" '
-                      '"\$http_user_agent" "\$http_x_forwarded_for"';
-    access_log  /var/log/nginx/access.log  main;
-    sendfile            on;
-    tcp_nopush          on;
-    tcp_nodelay         on;
-    keepalive_timeout   65;
-    types_hash_max_size 4096;
-    include             /etc/nginx/mime.types;
-    default_type        application/octet-stream;
-    include /etc/nginx/conf.d/*.conf;
-}
-EOF
-
-echo "Запуск nginx"
-
-systemctl enable --now nginx
-}
 
 
 function keystone_config() {
@@ -300,12 +263,12 @@ mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
 
 echo "Установка служб необходимых для работы Keystone"
 
-dnf --enablerepo=centos-openstack-zed,epel -y install openstack-keystone python3-openstackclient httpd mod_ssl python3-mod_wsgi python3-oauth2client mod_ssl
+dnf --enablerepo=centos-openstack-zed,epel -y install openstack-keystone python3-openstackclient httpd python3-mod_wsgi
 
 echo "Редактирование конфига /etc/keystone/keystone.conf"
 
-crudini --set /etc/keystone/keystone.conf database connection mysql+pymysql://keystone:$KEYSTONE_PASS@$NOVA_HOSTNAME/keystone
 crudini --set /etc/keystone/keystone.conf cache memcache_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/keystone/keystone.conf database connection mysql+pymysql://keystone:$KEYSTONE_PASS@$NOVA_HOSTNAME/keystone
 crudini --set /etc/keystone/keystone.conf token provider fernet
 
 echo "Инициализация БД keystone"
@@ -316,7 +279,15 @@ keystone-manage credential_setup --keystone-user keystone --keystone-group keyst
 
 echo "Инициализация сервиса Keystone с помощью keystone-manage bootstrap"
 
-keystone-manage bootstrap --bootstrap-password $ADMIN_PASS --bootstrap-admin-url https://$NOVA_HOSTNAME:5000/v3/ --bootstrap-internal-url https://$NOVA_HOSTNAME:5000/v3/ --bootstrap-public-url https://$NOVA_HOSTNAME:5000/v3/ --bootstrap-region-id RegionOne
+keystone-manage bootstrap --bootstrap-password $ADMIN_PASS --bootstrap-admin-url http://$NOVA_HOSTNAME:5000/v3/ --bootstrap-internal-url http://$NOVA_HOSTNAME:5000/v3/ --bootstrap-public-url http://$NOVA_HOSTNAME:5000/v3/ --bootstrap-region-id RegionOne
+
+echo "Редактирование конфига /etc/httpd/conf/httpd.conf"
+
+echo "ServerName $NOVA_HOSTNAME" >> /etc/httpd/conf/httpd.conf
+
+echo "Создание файла /etc/httpd/conf.d//wsgi-keystone.conf"
+
+ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/
 
 echo "Изменение политик SELinux касательно Httpd/Keystone"
 
@@ -349,47 +320,7 @@ echo "Добавление Keystone в исключения firewall"
 firewall-cmd --add-port=5000/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Создание собственного SSL/TLS сертификата для сервиса Keystone"
-
-echo "Редактирование конфига /etc/ssl/openssl.cnf"
-
-{
-echo "[$DNS]"
-echo "subjectAltName = DNS:$NOVA_HOSTNAME"
-} >> /etc/ssl/openssl.cnf
-
-echo "Создание RSA ключа /etc/pki/tls/certs/server.key"
-
-cd /etc/pki/tls/certs
-openssl genrsa -aes128 -passout pass:openstack 2048 > server.key
-
-echo "Удаление контрольной фразы из ключа server.key"
-
-openssl rsa -in server.key -out server.key --passin pass:openstack
-
-echo "Создание CSR токена /etc/pki/tls/certs/server.csr"
-
-openssl req -utf8 -new -key server.key -out server.csr -subj "/C=RU/ST=SPB/L=SPB/O=ITMO/CN=$NOVA_HOSTNAME"
-
-echo "Создание SSL сертификата /etc/pki/tls/certs/server.crt"
-
-openssl x509 -in server.csr -out server.crt -req -signkey server.key -extfile /etc/ssl/openssl.cnf -extensions $DNS -days 3650
-chmod 600 server.key
-
-echo "Редактирование конфига /etc/httpd/conf/httpd.conf"
-
-echo "ServerName $NOVA_HOSTNAME" >> /etc/httpd/conf/httpd.conf
-
-echo "Создание файла /etc/httpd/conf.d//wsgi-keystone.conf"
-
-sed -i -c '/\<VirtualHost \*\:5000\>/a \
-    SSLEngine on\
-    SSLCertificateFile /etc/pki/tls/certs/server.crt\
-    SSLCertificateKeyFile /etc/pki/tls/certs/server.key' /usr/share/keystone/wsgi-keystone.conf
-ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/
-cd ~/
-
-echo "Запуск Httpd/Keystone"
+echo "Запуск httpd(keystone)"
 
 systemctl enable --now httpd
 
@@ -402,20 +333,19 @@ echo "export OS_PASSWORD=$ADMIN_PASS"
 echo "export OS_PROJECT_NAME=admin"
 echo "export OS_USER_DOMAIN_NAME=default"
 echo "export OS_PROJECT_DOMAIN_NAME=default"
-echo "export OS_AUTH_URL=https://$NOVA_HOSTNAME:5000"
+echo "export OS_AUTH_URL=http://$NOVA_HOSTNAME:5000"
 echo "export OS_IDENTITY_API_VERSION=3"
 echo "export OS_IMAGE_API_VERSION=2"
 echo "export OS_VOLUME_API_VERSION=3"
 echo "export PS1='[\u@\h \W(Openstack_Admin)]\$ '"
-echo "export REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/server.crt"
 } > ~/keystonerc_adm
 source ~/keystonerc_adm
-
 
 echo "Создание проекта service для регистрации будущих сервисов"
 
 openstack project create --domain default --description "Service Project" service
 }
+
 
 
 function glance_config() {
@@ -437,9 +367,9 @@ openstack service create --name glance --description "Image Service" image
 
 echo "Создание точек входа в сервис glance"
 
-openstack endpoint create --region RegionOne image public https://$NOVA_HOSTNAME:9292
-openstack endpoint create --region RegionOne image internal https://$NOVA_HOSTNAME:9292
-openstack endpoint create --region RegionOne image admin https://$NOVA_HOSTNAME:9292
+openstack endpoint create --region RegionOne image public http://$NOVA_HOSTNAME:9292
+openstack endpoint create --region RegionOne image internal http://$NOVA_HOSTNAME:9292
+openstack endpoint create --region RegionOne image admin http://$NOVA_HOSTNAME:9292
 
 echo "Создание БД для сервиса Glance"
 
@@ -465,15 +395,14 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-glance
 
 echo "Редактирование конфига /etc/glance/glance-api.conf"
 
-crudini --set /etc/glance/glance-api.conf DEFAULT bind_host 127.0.0.1
 crudini --set /etc/glance/glance-api.conf DEFAULT transport_url rabbit://glance:$GLANCE_PASS@$NOVA_HOSTNAME
 crudini --set /etc/glance/glance-api.conf DEFAULT log_dir /var/log/glance
 crudini --set /etc/glance/glance-api.conf glance_store stores file,http
 crudini --set /etc/glance/glance-api.conf glance_store default_store file
 crudini --set /etc/glance/glance-api.conf glance_store filesystem_store_datadir /var/lib/glance/images/
 crudini --set /etc/glance/glance-api.conf database connection mysql+pymysql://glance:$GLANCE_PASS@$NOVA_HOSTNAME/glance
-crudini --set /etc/glance/glance-api.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/glance/glance-api.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/glance/glance-api.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/glance/glance-api.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/glance/glance-api.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/glance/glance-api.conf keystone_authtoken auth_type password
 crudini --set /etc/glance/glance-api.conf keystone_authtoken project_domain_name default
@@ -481,16 +410,11 @@ crudini --set /etc/glance/glance-api.conf keystone_authtoken user_domain_name de
 crudini --set /etc/glance/glance-api.conf keystone_authtoken project_name service
 crudini --set /etc/glance/glance-api.conf keystone_authtoken username glance
 crudini --set /etc/glance/glance-api.conf keystone_authtoken password $GLANCE_PASS
-crudini --set /etc/glance/glance-api.conf keystone_authtoken insecure true
 crudini --set /etc/glance/glance-api.conf paste_deploy flavor keystone
 
 echo "Инициализация БД glance"
 
 su -s /bin/bash glance -c "glance-manage db_sync"
-
-echo "Запуск openstack-glance-api"
-
-systemctl enable --now openstack-glance-api
 
 echo "Изменение политик SELinux касательно Glance"
 
@@ -543,984 +467,9 @@ echo "Добавление Glance в исключения firewall"
 firewall-cmd --add-port=9292/tcp
 firewall-cmd --runtime-to-permanent 
 
-echo "Редактирование конфига /etc/nginx/nginx.conf"
+echo "Запуск openstack-glance-api"
 
-cat << EOF > /etc/nginx/nginx.conf
-stream {
-    upstream glance-api {
-        server 127.0.0.1:9292;
-    }
-    server {
-        listen $NOVA_IP:9292 ssl;
-        proxy_pass glance-api;
-    }
-    ssl_certificate "/etc/pki/tls/certs/server.crt";
-    ssl_certificate_key "/etc/pki/tls/certs/server.key";
-}
-EOF
-
-echo "Перезапуск сервиса Nginx"
-
-systemctl restart nginx
-}
-
-
-function nova_controller_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Nova И Placement\033[0m"
-
-echo "Создание пользователя nova"
-
-source ~/keystonerc_adm
-openstack user create --domain default --project service --password $NOVA_PASS nova
-
-echo "Присваивание пользователю nova роли admin в проекте serivce"
-
-openstack role add --project service --user nova admin 
-
-echo "Создание пользователя placement"
-
-openstack user create --domain default --project service --password $PLACEMENT_PASS placement
-
-echo "Присваивание пользователю placement роли admin в проекте serivce"
-
-openstack role add --project service --user placement admin 
-
-echo "Создание сервиса nova"
-
-openstack service create --name nova --description "Compute Service" compute
-
-echo "Создание сервиса placement"
-
-openstack service create --name placement --description "Compute Placement Service" placement
-
-echo "Создание точек входа в сервиса nova"
-
-openstack endpoint create --region RegionOne compute public https://$NOVA_HOSTNAME:8774/v2.1
-openstack endpoint create --region RegionOne compute internal https://$NOVA_HOSTNAME:8774/v2.1
-openstack endpoint create --region RegionOne compute admin https://$NOVA_HOSTNAME:8774/v2.1
-
-echo "Создание точек входа в сервиса placement"
-
-openstack endpoint create --region RegionOne placement public https://$NOVA_HOSTNAME:8778
-openstack endpoint create --region RegionOne placement internal https://$NOVA_HOSTNAME:8778
-openstack endpoint create --region RegionOne placement admin https://$NOVA_HOSTNAME:8778
-
-echo "Создание трех БД (nova, nova_api и nova_cell0)для сервиса Nova"
-
-mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova_api;"
-mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova;"
-mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova_cell0;"
-
-echo "Выдача прав на работу с БД пользователю nova"
-
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
-
-echo "Создание БД для сервиса Placement"
-
-mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE placement;"
-
-echo "Выдача прав на работу с БД пользователю placement"
-
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' IDENTIFIED BY '$PLACEMENT_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' IDENTIFIED BY '$PLACEMENT_PASS';"
-
-echo "Создание пользователя nova в RabbitMQ"
-
-rabbitmqctl add_user nova $NOVA_PASS
-
-echo "Выдача созданному RabbitMQ пользователю всех разрешений"
-
-rabbitmqctl set_permissions nova ".*" ".*" ".*"
-
-echo "Установка служб необходимых для работы сервиса Nova и Placement"
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-nova openstack-placement-api 
-
-echo "Редактирование конфига /etc/nova/nova.conf"
-
-crudini --set /etc/nova/nova.conf DEFAULT osapi_compute_listen 127.0.0.1
-crudini --set /etc/nova/nova.conf DEFAULT osapi_compute_listen_port 8774
-crudini --set /etc/nova/nova.conf DEFAULT metadata_listen 127.0.0.1
-crudini --set /etc/nova/nova.conf DEFAULT metadata_listen_port 8775
-crudini --set /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
-crudini --set /etc/nova/nova.conf DEFAULT log_dir /var/log/nova
-crudini --set /etc/nova/nova.conf DEFAULT state_path /var/lib/nova
-crudini --set /etc/nova/nova.conf DEFAULT transport_url rabbit://nova:$NOVA_PASS@$NOVA_HOSTNAME
-crudini --set /etc/nova/nova.conf api auth_strategy keystone
-crudini --set /etc/nova/nova.conf vnc enabled true 
-crudini --set /etc/nova/nova.conf vnc novncproxy_host 127.0.0.1
-crudini --set /etc/nova/nova.conf vnc novncproxy_port 6080
-crudini --set /etc/nova/nova.conf vnc novncproxy_base_url https://$NOVA_HOSTNAME:6080/vnc_auto.html
-crudini --set /etc/nova/nova.conf glance api_servers https://$NOVA_HOSTNAME:9292
-crudini --set /etc/nova/nova.conf glance insecure true
-crudini --set /etc/nova/nova.conf cinder insecure true
-crudini --set /etc/nova/nova.conf keystone insecure true
-crudini --set /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
-crudini --set /etc/nova/nova.conf api_database connection mysql+pymysql://nova:$NOVA_PASS@$NOVA_HOSTNAME/nova_api
-crudini --set /etc/nova/nova.conf database connection mysql+pymysql://nova:$NOVA_PASS@$NOVA_HOSTNAME/nova
-crudini --set /etc/nova/nova.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf keystone_authtoken auth_type password
-crudini --set /etc/nova/nova.conf keystone_authtoken project_domain_name default
-crudini --set /etc/nova/nova.conf keystone_authtoken user_domain_name default
-crudini --set /etc/nova/nova.conf keystone_authtoken project_name service
-crudini --set /etc/nova/nova.conf keystone_authtoken username nova
-crudini --set /etc/nova/nova.conf keystone_authtoken password $NOVA_PASS
-crudini --set /etc/nova/nova.conf keystone_authtoken insecure true
-crudini --set /etc/nova/nova.conf placement auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf placement os_region_name RegionOne
-crudini --set /etc/nova/nova.conf placement auth_type password
-crudini --set /etc/nova/nova.conf placement project_domain_name default
-crudini --set /etc/nova/nova.conf placement user_domain_name default
-crudini --set /etc/nova/nova.conf placement project_name service
-crudini --set /etc/nova/nova.conf placement username placement
-crudini --set /etc/nova/nova.conf placement password $PLACEMENT_PASS
-crudini --set /etc/nova/nova.conf placement insecure true
-crudini --set /etc/nova/nova.conf wsgi api_paste_config /etc/nova/api-paste.ini
-
-echo "Редактирование конфига /etc/placement/placement.conf"
-
-crudini --set /etc/placement/placement.conf DEFAULT debug false 
-crudini --set /etc/placement/placement.conf api auth_strategy keystone
-crudini --set /etc/placement/placement.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/placement/placement.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/placement/placement.conf keystone_authtoken auth_type password
-crudini --set /etc/placement/placement.conf keystone_authtoken project_domain_name default
-crudini --set /etc/placement/placement.conf keystone_authtoken user_domain_name default
-crudini --set /etc/placement/placement.conf keystone_authtoken project_name service
-crudini --set /etc/placement/placement.conf keystone_authtoken username placement
-crudini --set /etc/placement/placement.conf keystone_authtoken password $PLACEMENT_PASS
-crudini --set /etc/placement/placement.conf keystone_authtoken insecure true
-crudini --set /etc/placement/placement.conf placement_database connection mysql+pymysql://placement:$PLACEMENT_PASS@$NOVA_HOSTNAME/placement
-
-echo "Редактирование кофига /etc/httpd/conf.d/00-placement-api.conf"
-
-sed -i -e "s/Listen 8778/Listen 127.0.0.1:8778/g" /etc/httpd/conf.d/00-placement-api.conf
-sed -i -c '/\/VirtualHost/i \
-  <Directory /usr/bin>\
-    Require all granted\
-  </Directory>' /etc/httpd/conf.d/00-placement-api.conf 
-
-echo "Уствновка openstack-selinux"
-
-dnf --enablerepo=centos-openstack-zed -y install openstack-selinux
-
-echo "Изменение политик SELinux касательно Placement"
-
-semanage port -a -t http_port_t -p tcp 8778
-
-echo "Изменение политик SELinux касательно Nova"
-
-cat << EOF > novaapi.te
-module novaapi 1.0;
-
-require {
-        type rpm_exec_t;
-        type hostname_exec_t;
-        type nova_t;
-        type nova_var_lib_t;
-        type virtlogd_t;
-        type geneve_port_t;
-        type mysqld_exec_t;
-        type mysqld_safe_exec_t;
-        type gpg_exec_t;
-        type crontab_exec_t;
-        type consolehelper_exec_t;
-        type keepalived_exec_t;
-        class dir { add_name remove_name search write };
-        class file { append create getattr open unlink };
-        class capability dac_override;
-
-}
-
-#============= nova_t ==============
-allow nova_t mysqld_exec_t:file getattr;
-allow nova_t mysqld_safe_exec_t:file getattr;
-allow nova_t gpg_exec_t:file getattr;
-allow nova_t hostname_exec_t:file getattr;
-allow nova_t rpm_exec_t:file getattr;
-allow nova_t consolehelper_exec_t:file getattr;
-allow nova_t crontab_exec_t:file getattr;
-allow nova_t keepalived_exec_t:file getattr;
-
-#============= virtlogd_t ==============
-allow virtlogd_t nova_var_lib_t:dir { add_name remove_name search write };
-allow virtlogd_t nova_var_lib_t:file { append create getattr open unlink };
-allow virtlogd_t self:capability dac_override;
-EOF
-checkmodule -m -M -o novaapi.mod novaapi.te
-semodule_package --outfile novaapi.pp --module novaapi.mod
-semodule -i novaapi.pp
-
-echo "Добавление Nova и Placement в исключения firewall"
-
-firewall-cmd --add-port={6080/tcp,6081/tcp,6082/tcp,8774/tcp,8775/tcp,8778/tcp}
-firewall-cmd --runtime-to-permanent
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream nova-api {\
-        server 127.0.0.1:8774;\
-    }\
-    server {\
-        listen '$NOVA_IP':8774 ssl;\
-        proxy_pass nova-api;\
-    }\
-    upstream nova-metadata-api {\
-        server 127.0.0.1:8775;\
-    }\
-    server {\
-        listen '$NOVA_IP':8775 ssl;\
-        proxy_pass nova-metadata-api;\
-    }\
-    upstream placement-api {\
-        server 127.0.0.1:8778;\
-    }\
-    server {\
-        listen '$NOVA_IP':8778 ssl;\
-        proxy_pass placement-api;\
-    }\
-    upstream novncproxy {\
-        server 127.0.0.1:6080;\
-    }\
-    server {\
-        listen '$NOVA_IP':6080 ssl;\
-        proxy_pass novncproxy;\
-    }' /etc/nginx/nginx.conf
-    
-echo "Инициализация БД placement"
-
-su -s /bin/bash placement -c "placement-manage db sync" 
-
-echo "Инициализация БД nova_api"
-
-su -s /bin/bash nova -c "nova-manage api_db sync" 
-
-echo "Регистрация БД nova-cell0 в БД nova_api"
-
-su -s /bin/bash nova -c "nova-manage cell_v2 map_cell0"
-
-echo "Инициализация БД nova"
-
-su -s /bin/bash nova -c "nova-manage db sync"
-
-echo "Создание ячейки cell1 в БД nova_api"
-
-su -s /bin/bash nova -c "nova-manage cell_v2 create_cell --name cell1"
-
-echo "Выдача прав на папку с логами сервису Placement"
-
-chown placement. /var/log/placement/
-
-echo "Перезапуск Nginx и Httpd"
-
-systemctl restart nginx
-
-systemctl restart httpd
-
-echo "Запуск сервисов openstack-nova-api openstack-nova-conductor openstack-nova-scheduler openstack-nova-novncproxy"
-
-systemctl enable --now openstack-nova-api
-systemctl enable --now openstack-nova-conductor
-systemctl enable --now openstack-nova-scheduler
-systemctl enable --now openstack-nova-novncproxy
-
-echo "Регистрация гипервизоров рабочих узлов, если они есть"
-
-su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
-}
-
-
-
-
-function nova_compute_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Nova\033[0m"
-
-echo "Установка служб необходимых для работы сервиса гипервизора KVM"
-
-dnf -y install qemu-kvm libvirt virt-install
-
-echo "Запуск libvirtd"
-ё
-systemctl enable --now libvirtd
-
-echo "Установка службы openstack-nova-compute" 
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-nova-compute
-
-echo "Редактирование конфига /etc/nova/nova.conf"
-
-crudini --set /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
-crudini --set /etc/nova/nova.conf DEFAULT log_dir /var/log/nova
-crudini --set /etc/nova/nova.conf DEFAULT transport_url rabbit://nova:$NOVA_PASS@$NOVA_HOSTNAME
-crudini --set /etc/nova/nova.conf DEFAULT compute_driver libvirt.LibvirtDriver
-crudini --set /etc/nova/nova.conf DEFAULT state_path /var/lib/nova
-crudini --set /etc/nova/nova.conf api auth_strategy keystone
-crudini --set /etc/nova/nova.conf vnc enabled true 
-crudini --set /etc/nova/nova.conf vnc server_listen $HOST_IP
-crudini --set /etc/nova/nova.conf vnc server_proxyclient_address $HOST_IP
-crudini --set /etc/nova/nova.conf vnc novncproxy_base_url https://$NOVA_HOSTNAME:6080/vnc_auto.html
-crudini --set /etc/nova/nova.conf glance api_servers https://$NOVA_HOSTNAME:9292
-crudini --set /etc/nova/nova.conf glance insecure true
-crudini --set /etc/nova/nova.conf cinder insecure true
-crudini --set /etc/nova/nova.conf keystone insecure true
-crudini --set /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
-crudini --set /etc/nova/nova.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
-crudini --set /etc/nova/nova.conf keystone_authtoken auth_type password
-crudini --set /etc/nova/nova.conf keystone_authtoken project_domain_name default
-crudini --set /etc/nova/nova.conf keystone_authtoken user_domain_name default
-crudini --set /etc/nova/nova.conf keystone_authtoken project_name service
-crudini --set /etc/nova/nova.conf keystone_authtoken username nova
-crudini --set /etc/nova/nova.conf keystone_authtoken password $NOVA_PASS
-crudini --set /etc/nova/nova.conf keystone_authtoken insecure true
-crudini --set /etc/nova/nova.conf placement auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf placement region_name RegionOne
-crudini --set /etc/nova/nova.conf placement auth_type password
-crudini --set /etc/nova/nova.conf placement project_domain_name default
-crudini --set /etc/nova/nova.conf placement user_domain_name default
-crudini --set /etc/nova/nova.conf placement project_name service
-crudini --set /etc/nova/nova.conf placement username placement
-crudini --set /etc/nova/nova.conf placement password $PLACEMENT_PASS
-crudini --set /etc/nova/nova.conf placement insecure true
-crudini --set /etc/nova/nova.conf wsgi api_paste_config /etc/nova/api-paste.ini
-
-echo "Установка openstack-selinux"
-
-dnf --enablerepo=centos-openstack-zed -y install openstack-selinux
-
-echo "Добавление Nova в исключения firewall"
-
-firewall-cmd --add-port=5900-5999/tcp
-firewall-cmd --runtime-to-permanent
-
-echo "Запуск openstack-nova-compute"
-
-systemctl enable --now openstack-nova-compute
-}
-
-
-
-
-
-function neutron_controller_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
-
-echo "Создание пользователя neutron"
-
-source ~/keystonerc_adm
-openstack user create --domain default --project service --password $NEUTRON_PASS neutron
-
-echo "Присваивание пользователю neutron роли admin в проекте serivce"
-
-openstack role add --project service --user neutron admin 
-
-echo "Создание сервиса neutron"
-
-openstack service create --name neutron --description "Networking Service" network
-
-echo "Создание точек входа в сервиса neutron"
-
-openstack endpoint create --region RegionOne network public https://$NOVA_HOSTNAME:9696
-openstack endpoint create --region RegionOne network internal https://$NOVA_HOSTNAME:9696
-openstack endpoint create --region RegionOne network admin https://$NOVA_HOSTNAME:9696
-
-echo "Создание БД для сервиса Neutron"
-
-mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE neutron;"
-#
-echo "Выдача прав на работу с БД пользователю neutron"
-
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '$NEUTRON_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY '$NEUTRON_PASS';"
-mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
-
-echo "Создание пользователя neutron в RabbitMQ"
-
-rabbitmqctl add_user neutron $NEUTRON_PASS
-
-echo "Выдача созданному RabbitMQ пользователю всех разрешений"
-
-rabbitmqctl set_permissions neutron ".*" ".*" ".*"
-
-echo "Установка служб необходимых для работы сервиса Neutron"
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-neutron openstack-neutron-ml2
-
-echo "Редактирование конфига /etc/neutron/neutron.conf"
-
-crudini --set /etc/neutron/neutron.conf DEFAULT bind_host 127.0.0.1
-crudini --set /etc/neutron/neutron.conf DEFAULT bind_port 9696
-crudini --set /etc/neutron/neutron.conf DEFAULT core_plugin ml2
-crudini --set /etc/neutron/neutron.conf DEFAULT service_plugins router
-crudini --set /etc/neutron/neutron.conf DEFAULT transport_url rabbit://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME
-crudini --set /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
-crudini --set /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
-crudini --set /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
-crudini --set /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
-crudini --set /etc/neutron/neutron.conf DEFAULT dhcp_agent_notification true
-crudini --set /etc/neutron/neutron.conf DEFAULT state_path /var/lib/neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_type password
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_name service
-crudini --set /etc/neutron/neutron.conf keystone_authtoken username neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken password $NEUTRON_PASS
-crudini --set /etc/neutron/neutron.conf keystone_authtoken insecure true
-crudini --set /etc/neutron/neutron.conf database connection mysql+pymysql://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME/neutron
-crudini --set /etc/neutron/neutron.conf nova auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf nova auth_type password
-crudini --set /etc/neutron/neutron.conf nova project_domain_name default
-crudini --set /etc/neutron/neutron.conf nova user_domain_name default
-crudini --set /etc/neutron/neutron.conf nova region_name RegionOne
-crudini --set /etc/neutron/neutron.conf nova project_name service
-crudini --set /etc/neutron/neutron.conf nova username nova
-crudini --set /etc/neutron/neutron.conf nova password $NOVA_PASS
-crudini --set /etc/neutron/neutron.conf nova insecure true
-crudini --set /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
-
-echo "Редактирование конфига /etc/neutron/metadata_agent.ini"
-
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT nova_metadata_host $NOVA_HOSTNAME
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT nova_metadata_protocol https
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT metadata_proxy_shared_secret $METADATA_SECRET
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT memcache_servers $NOVA_HOSTNAME:11211
-
-echo "Редактирование конфига /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks external
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan,gre
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
-
-echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
-
-echo "Редактирование конфига /etc/nova/nova.conf"
-
-crudini --set /etc/nova/nova.conf neutron auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf neutron auth_type password
-crudini --set /etc/nova/nova.conf neutron project_domain_name default
-crudini --set /etc/nova/nova.conf neutron user_domain_name default
-crudini --set /etc/nova/nova.conf neutron region_name RegionOne
-crudini --set /etc/nova/nova.conf neutron project_name service
-crudini --set /etc/nova/nova.conf neutron username neutron
-crudini --set /etc/nova/nova.conf neutron password $NEUTRON_PASS
-crudini --set /etc/nova/nova.conf neutron service_metadata_proxy true
-crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret $METADATA_SECRET
-crudini --set /etc/nova/nova.conf neutron insecure true
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream neutron-api {\
-        server 127.0.0.1:9696;\
-    }\
-    server {\
-        listen '$NOVA_IP':9696 ssl;\
-        proxy_pass neutron-api;\
-    }' /etc/nginx/nginx.conf
-
-echo "Инициализация БД neutron"
-
-su -s /bin/bash neutron -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugin.ini upgrade head"
-
-echo "Установка openstack-selinux"
-
-dnf --enablerepo=centos-openstack-zed -y install openstack-selinux 
-
-echo "Изменение политик SELinux касательно Neutron"
-
-setsebool -P neutron_can_network on
-setsebool -P daemons_enable_cluster_mode on
-cat << EOF > ovsofctl.te
-module ovsofctl 1.0;
-
-require {
-        type neutron_t;
-        type neutron_exec_t;
-        type dnsmasq_t;
-        type openvswitch_load_module_t;
-        type tracefs_t;
-        type var_run_t;
-        type openvswitch_t;
-        type ovsdb_port_t;
-        type kdumpctl_exec_t;
-        type devicekit_exec_t;
-        type lsmd_exec_t;
-        type lsmd_plugin_exec_t;
-        type locate_exec_t;
-        type glance_scrubber_exec_t;
-        type gpg_agent_exec_t;
-        type mount_exec_t;
-        type rsync_exec_t;
-        type journalctl_exec_t;
-        type virt_qemu_ga_exec_t;
-        type httpd_config_t;
-        type chfn_exec_t;
-        type glance_api_exec_t;
-        type ssh_exec_t;
-        type ssh_agent_exec_t;
-        type systemd_hwdb_exec_t;
-        type checkpolicy_exec_t;
-        type chronyc_exec_t;
-        type groupadd_exec_t;
-        type loadkeys_exec_t;
-        type fusermount_exec_t;
-        type dmesg_exec_t;
-        type rpmdb_exec_t;
-        type memcached_exec_t;
-        type conmon_exec_t;
-        type systemd_tmpfiles_exec_t;
-        type passwd_exec_t;
-        type ssh_keygen_exec_t;
-        type NetworkManager_exec_t;
-        type su_exec_t;
-        type dbusd_exec_t;
-        type numad_exec_t;
-        type container_runtime_exec_t;
-        type ping_exec_t;
-        type rpcbind_exec_t;
-        type virtd_exec_t;
-        type policykit_auth_exec_t;
-        type systemd_systemctl_exec_t;
-        type plymouth_exec_t;
-        type keepalived_exec_t;
-        type mandb_exec_t;
-        type systemd_passwd_agent_exec_t;
-        type traceroute_exec_t;
-        type fsadm_exec_t;
-        type thumb_exec_t;
-        type mysqld_exec_t;
-        type nova_exec_t;
-        type crontab_exec_t;
-        type swtpm_exec_t;
-        type virsh_exec_t;
-        type mysqld_safe_exec_t;
-        type systemd_notify_exec_t;
-        type vlock_exec_t;
-        type gpg_exec_t;
-        type login_exec_t;
-        type hostname_exec_t;
-        class sock_file write;
-        class file { execute_no_trans getattr };
-        class dir search;
-        class tcp_socket name_bind;
-        class capability { dac_override sys_rawio };
-}
-
-#============= neutron_t ==============
-allow neutron_t self:capability { dac_override sys_rawio };
-allow neutron_t neutron_exec_t:file execute_no_trans;
-allow neutron_t NetworkManager_exec_t:file getattr;
-allow neutron_t checkpolicy_exec_t:file getattr;
-allow neutron_t chfn_exec_t:file getattr;
-allow neutron_t chronyc_exec_t:file getattr;
-allow neutron_t conmon_exec_t:file getattr;
-allow neutron_t container_runtime_exec_t:file getattr;
-allow neutron_t crontab_exec_t:file getattr;
-allow neutron_t dbusd_exec_t:file getattr;
-allow neutron_t devicekit_exec_t:file getattr;
-allow neutron_t dmesg_exec_t:file getattr;
-allow neutron_t fsadm_exec_t:file getattr;
-allow neutron_t fusermount_exec_t:file getattr;
-allow neutron_t glance_api_exec_t:file getattr;
-allow neutron_t glance_scrubber_exec_t:file getattr;
-allow neutron_t gpg_agent_exec_t:file getattr;
-allow neutron_t gpg_exec_t:file getattr;
-allow neutron_t groupadd_exec_t:file getattr;
-allow neutron_t hostname_exec_t:file getattr;
-allow neutron_t httpd_config_t:dir search;
-allow neutron_t journalctl_exec_t:file getattr;
-allow neutron_t kdumpctl_exec_t:file getattr;
-allow neutron_t keepalived_exec_t:file getattr;
-allow neutron_t loadkeys_exec_t:file getattr;
-allow neutron_t locate_exec_t:file getattr;
-allow neutron_t login_exec_t:file getattr;
-allow neutron_t lsmd_exec_t:file getattr;
-allow neutron_t lsmd_plugin_exec_t:file getattr;
-allow neutron_t mandb_exec_t:file getattr;
-allow neutron_t memcached_exec_t:file getattr;
-allow neutron_t mount_exec_t:file getattr;
-allow neutron_t mysqld_exec_t:file getattr;
-allow neutron_t mysqld_safe_exec_t:file getattr;
-allow neutron_t nova_exec_t:file getattr;
-allow neutron_t numad_exec_t:file getattr;
-allow neutron_t passwd_exec_t:file getattr;
-allow neutron_t ping_exec_t:file getattr;
-allow neutron_t plymouth_exec_t:file getattr;
-allow neutron_t policykit_auth_exec_t:file getattr;
-allow neutron_t rpcbind_exec_t:file getattr;
-allow neutron_t rpmdb_exec_t:file getattr;
-allow neutron_t rsync_exec_t:file getattr;
-allow neutron_t ssh_agent_exec_t:file getattr;
-allow neutron_t ssh_exec_t:file getattr;
-allow neutron_t ssh_keygen_exec_t:file getattr;
-allow neutron_t su_exec_t:file getattr;
-allow neutron_t swtpm_exec_t:file getattr;
-allow neutron_t systemd_hwdb_exec_t:file getattr;
-allow neutron_t systemd_notify_exec_t:file getattr;
-allow neutron_t systemd_passwd_agent_exec_t:file getattr;
-allow neutron_t systemd_systemctl_exec_t:file getattr;
-allow neutron_t systemd_tmpfiles_exec_t:file getattr;
-allow neutron_t thumb_exec_t:file getattr;
-allow neutron_t traceroute_exec_t:file getattr;
-allow neutron_t virsh_exec_t:file getattr;
-allow neutron_t virt_qemu_ga_exec_t:file getattr;
-allow neutron_t virtd_exec_t:file getattr;
-allow neutron_t vlock_exec_t:file getattr;
-
-#============= openvswitch_t ==============
-allow openvswitch_t var_run_t:sock_file write;
-allow openvswitch_t ovsdb_port_t:tcp_socket name_bind;
-
-#============= openvswitch_load_module_t ==============
-allow openvswitch_load_module_t tracefs_t:dir search;
-
-#============= dnsmasq_t ==============
-allow dnsmasq_t self:capability dac_override;
-EOF
-checkmodule -m -M -o ovsofctl.mod ovsofctl.te
-semodule_package --outfile ovsofctl.pp --module ovsofctl.mod
-semodule -i ovsofctl.pp
-
-echo "Добавление Neutron в исключения firewall"
-
-firewall-cmd --add-port=9696/tcp
-firewall-cmd --runtime-to-permanent
-
-echo "Перезапуск openstack-nova-api и nginx"
-
-systemctl restart openstack-nova-api
-systemctl restart nginx
-
-echo "Запуск neutron-server и neutron-metadata-agent"
-
-systemctl enable --now neutron-server neutron-metadata-agent 
-}
-
-
-
-
-
-function neutron_network_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
-
-echo "Установка служб необходимых для работы сервиса Neutron"
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch libibverbs
-
-echo "Редактирование конфига /etc/neutron/neutron.conf"
-
-crudini --set /etc/neutron/neutron.conf DEFAULT core_plugin ml2
-crudini --set /etc/neutron/neutron.conf DEFAULT service_plugins router
-crudini --set /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
-crudini --set /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
-crudini --set /etc/neutron/neutron.conf DEFAULT transport_url rabbit://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME
-crudini --set /etc/neutron/neutron.conf DEFAULT state_path /var/lib/neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_type password
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_name service
-crudini --set /etc/neutron/neutron.conf keystone_authtoken username neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken password $NEUTRON_PASS
-crudini --set /etc/neutron/neutron.conf keystone_authtoken insecure true
-crudini --set /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
-
-echo "Редактирование конфига /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan,gre
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks external
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks external
-
-echo "Редактирование конфига /etc/neutron/l3_agent.ini"
-
-crudini --set /etc/neutron/l3_agent.ini DEFAULT interface_driver openvswitch
-
-echo "Редактирование конфига /etc/neutron/dhcp_agent.ini"
-
-crudini --set /etc/neutron/dhcp_agent.ini DEFAULT interface_driver openvswitch
-crudini --set /etc/neutron/dhcp_agent.ini DEFAULT dhcp_driver neutron.agent.linux.dhcp.Dnsmasq
-crudini --set /etc/neutron/dhcp_agent.ini DEFAULT enable_isolated_metadata true
-
-echo "Редактирование конфига /etc/neutron/metadata_agent.ini"
-
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT nova_metadata_host $NOVA_HOSTNAME
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT nova_metadata_protocol https
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT metadata_proxy_shared_secret $METADATA_SECRET
-crudini --set /etc/neutron/metadata_agent.ini DEFAULT memcache_servers $NOVA_HOSTNAME:11211
-
-echo "Редактирование конфига /etc/neutron/plugins/ml2/openvswitch_agent.ini"
-
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip $HOST_IP
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings external:br-ex
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini agent prevent_arp_spoofing true
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup firewall_driver openvswitch
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup enable_security_group true
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup enable_ipset true
-
-echo "Установка openstack-selinux"
-
-dnf --enablerepo=centos-openstack-zed -y install openstack-selinux 
-
-echo "Изменение политик SELinux касательно Neutron"
-
-setsebool -P neutron_can_network on
-setsebool -P haproxy_connect_any on
-setsebool -P daemons_enable_cluster_mode on
-cat << EOF > ovsofctl.te
-module ovsofctl 1.0;
-
-require {
-        type crontab_exec_t;
-        type gpg_exec_t;
-        type hostname_exec_t;
-        type keepalived_exec_t;
-        type openflow_port_t;
-        type neutron_tmp_t;
-        type neutron_t;
-        type neutron_exec_t;
-        type neutron_t;
-        type dnsmasq_t;
-        type tracefs_t;
-        type nsfs_t;
-        type openvswitch_load_module_t;
-        class file { execute_no_trans getattr open read };
-        class dir search;
-        class filesystem unmount;
-        class sock_file { create unlink write };
-        class tcp_socket name_bind;
-        class capability { dac_override sys_rawio };
-}
-
-#============= neutron_t ==============
-allow neutron_t self:capability { dac_override sys_rawio };
-allow neutron_t neutron_exec_t:file execute_no_trans;
-allow neutron_t neutron_tmp_t:sock_file { create unlink write };
-allow neutron_t openflow_port_t:tcp_socket name_bind;
-allow neutron_t crontab_exec_t:file getattr;
-allow neutron_t gpg_exec_t:file getattr;
-allow neutron_t hostname_exec_t:file getattr;
-allow neutron_t keepalived_exec_t:file getattr;
-allow neutron_t nsfs_t:file { getattr open read };
-allow neutron_t nsfs_t:filesystem unmount;
-
-#============= openvswitch_load_module_t ==============
-allow openvswitch_load_module_t tracefs_t:dir search;
-
-#============= dnsmasq_t ==============
-allow dnsmasq_t self:capability dac_override;
-EOF
-checkmodule -m -M -o ovsofctl.mod ovsofctl.te
-semodule_package --outfile ovsofctl.pp --module ovsofctl.mod
-semodule -i ovsofctl.pp
-
-echo "Добавление Neutron в исключения firewall"
-
-firewall-cmd --add-port=4789/udp
-firewall-cmd --runtime-to-permanent
-
-echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
-
-echo "Запуск openvswitch"
-
-systemctl enable --now openvswitch
-
-echo "Добавление моста br-int с помощью OpenvSwitch"
-
-ovs-vsctl add-br br-int
-
-echo "Добавление моста br-ex с помощью OpenvSwitch"
-
-ovs-vsctl add-br br-ex
-
-echo "Мапим мост br-ex на сетевой интерфейс enp*s0"
-
-enp=$(ip a | grep -E "enp[0-9]s0:" | grep -Eo "enp[2-9]s0")
-
-ovs-vsctl add-port br-ex $enp
-
-echo "Запуск neutron-openvswitch-agent, neutron-l3-agent, neutron-dhcp-agent и neutron-metadata-agent"
-
-systemctl enable --now neutron-dhcp-agent
-systemctl enable --now neutron-l3-agent
-systemctl enable --now neutron-metadata-agent
-systemctl enable --now neutron-openvswitch-agent
-}
-
-
-
-
-
-function neutron_compute_config() {
-
-echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
-
-echo "Установка служб необходимых для работы сервиса Neutron"
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch
-
-echo "Редактирование конфига /etc/neutron/neutron.conf"
-
-crudini --set /etc/neutron/neutron.conf DEFAULT core_plugin ml2
-crudini --set /etc/neutron/neutron.conf DEFAULT service_plugins router
-crudini --set /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
-crudini --set /etc/neutron/neutron.conf DEFAULT transport_url rabbit://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME
-crudini --set /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
-crudini --set /etc/neutron/neutron.conf DEFAULT state_path /var/lib/neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/neutron/neutron.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
-crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_type password
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
-crudini --set /etc/neutron/neutron.conf keystone_authtoken project_name service
-crudini --set /etc/neutron/neutron.conf keystone_authtoken username neutron
-crudini --set /etc/neutron/neutron.conf keystone_authtoken password $NEUTRON_PASS
-crudini --set /etc/neutron/neutron.conf keystone_authtoken insecure true
-crudini --set /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
-
-echo "Редактирование конфига /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan,gre
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000
-crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks external
-
-echo "Редактирование конфига /etc/nova/nova.conf"
-
-crudini --set /etc/nova/nova.conf DEFAULT vif_plugging_is_fatal True
-crudini --set /etc/nova/nova.conf DEFAULT vif_plugging_timeout 300
-crudini --set /etc/nova/nova.conf neutron auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/nova/nova.conf neutron auth_type password
-crudini --set /etc/nova/nova.conf neutron project_domain_name default
-crudini --set /etc/nova/nova.conf neutron user_domain_name default
-crudini --set /etc/nova/nova.conf neutron region_name RegionOne
-crudini --set /etc/nova/nova.conf neutron project_name service
-crudini --set /etc/nova/nova.conf neutron username neutron
-crudini --set /etc/nova/nova.conf neutron password $NEUTRON_PASS
-crudini --set /etc/nova/nova.conf neutron service_metadata_proxy true
-crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret $METADATA_SECRET
-crudini --set /etc/nova/nova.conf neutron insecure true
-
-echo "Редактирование конфига /etc/neutron/plugins/ml2/openvswitch_agent.ini"
-
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip $HOST_IP
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini agent prevent_arp_spoofing true
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup firewall_drver openvswitch
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup enable_security_group true
-crudini --set /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup enable_ipset true
-
-echo "Установка openstack-selinux"
-
-dnf --enablerepo=centos-openstack-zed -y install openstack-selinux 
-
-echo "Изменение политик SELinux касательно Neutron"
-
-setsebool -P neutron_can_network on
-setsebool -P daemons_enable_cluster_mode on
-cat << EOF > ovsofctl.te
-module ovsofctl 1.0;
-
-require {
-        type crontab_exec_t;
-        type hostname_exec_t;
-        type openflow_port_t;
-        type keepalived_exec_t;
-        type neutron_t;
-        type gpg_exec_t;
-        type neutron_tmp_t;
-        type neutron_exec_t;
-        type neutron_t;
-        type dnsmasq_t;
-        type tracefs_t;
-        type openvswitch_load_module_t;
-        type openvswitch_t;
-        type ovsdb_port_t;
-        class file { execute_no_trans getattr };
-        class dir search;
-        class sock_file { create unlink write };
-        class tcp_socket name_bind;
-        class capability { dac_override sys_rawio };
-}
-
-#============= neutron_t ==============
-allow neutron_t self:capability { dac_override sys_rawio };
-allow neutron_t neutron_exec_t:file execute_no_trans;
-allow neutron_t crontab_exec_t:file getattr;
-allow neutron_t gpg_exec_t:file getattr;
-allow neutron_t hostname_exec_t:file getattr;
-allow neutron_t keepalived_exec_t:file getattr;
-allow neutron_t neutron_tmp_t:sock_file { create unlink write };
-allow neutron_t openflow_port_t:tcp_socket name_bind;
-
-#============= openvswitch_load_module_t ==============
-allow openvswitch_load_module_t tracefs_t:dir search;
-
-#============= openvswitch_t ==============
-allow openvswitch_t ovsdb_port_t:tcp_socket name_bind;
-
-#============= dnsmasq_t ==============
-allow dnsmasq_t self:capability dac_override;
-EOF
-checkmodule -m -M -o ovsofctl.mod ovsofctl.te
-semodule_package --outfile ovsofctl.pp --module ovsofctl.mod
-semodule -i ovsofctl.pp
-
-echo "Добавление Neutron в исключения firewall"
-
-firewall-cmd --add-port=4789/udp
-firewall-cmd --runtime-to-permanent
-
-echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
-
-ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
-
-echo "Запуск openvswitch"
-
-systemctl enable --now openvswitch
-
-echo "Добавление моста br-int с помощью OpenvSwitch"
-
-ovs-vsctl add-br br-int 
-
-echo "Перезапуск openstack-nova-compute"
-
-systemctl restart openstack-nova-compute
-
-echo "Запуск neutron-openvswitch-agent"
-
-systemctl enable --now neutron-openvswitch-agent
+systemctl enable --now openstack-glance-api
 }
 
 
@@ -1545,9 +494,9 @@ openstack service create --name cinderv3 --description "Block Storage" volumev3
 
 echo "Создание точек входа в сервисы cinder"
 
-openstack endpoint create --region RegionOne volumev3 public https://$NOVA_HOSTNAME:8776/v3
-openstack endpoint create --region RegionOne volumev3 internal https://$NOVA_HOSTNAME:8776/v3
-openstack endpoint create --region RegionOne volumev3 admin https://$NOVA_HOSTNAME:8776/v3
+openstack endpoint create --region RegionOne volumev3 public http://$NOVA_HOSTNAME:8776/v3
+openstack endpoint create --region RegionOne volumev3 internal http://$NOVA_HOSTNAME:8776/v3
+openstack endpoint create --region RegionOne volumev3 admin http://$NOVA_HOSTNAME:8776/v3
 
 echo "Создание БД для сервиса Cinder"
 
@@ -1571,23 +520,17 @@ echo "Установка служб необходимых для работы �
 
 dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-cinder
 
-echo "Установка targetcli"
-
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install targetcli
-
 echo "Редактирование конфига /etc/cinder/cinder.conf"
 
-crudini --set /etc/cinder/cinder.conf DEFAULT osapi_volume_listen 127.0.0.1
-crudini --set /etc/cinder/cinder.conf DEFAULT osapi_volume_listen_port 8776
 crudini --set /etc/cinder/cinder.conf DEFAULT rootwrap_config /etc/cinder/rootwrap.conf
 crudini --set /etc/cinder/cinder.conf DEFAULT api_paste_confg /etc/cinder/api-paste.ini
-crudini --set /etc/cinder/cinder.conf DEFAULT auth_strategy keystone
-crudini --set /etc/cinder/cinder.conf DEFAULT transport_url rabbit://cinder:$CINDER_PASS@$NOVA_HOSTNAME
 crudini --set /etc/cinder/cinder.conf DEFAULT enable_v3_api true
+crudini --set /etc/cinder/cinder.conf DEFAULT transport_url rabbit://cinder:$CINDER_PASS@$NOVA_HOSTNAME
 crudini --set /etc/cinder/cinder.conf DEFAULT state_path /var/lib/cinder
+crudini --set /etc/cinder/cinder.conf DEFAULT auth_strategy keystone
 crudini --set /etc/cinder/cinder.conf database connection mysql+pymysql://cinder:$CINDER_PASS@$NOVA_HOSTNAME/cinder
-crudini --set /etc/cinder/cinder.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/cinder/cinder.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/cinder/cinder.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_type password
 crudini --set /etc/cinder/cinder.conf keystone_authtoken project_domain_name default
@@ -1595,19 +538,7 @@ crudini --set /etc/cinder/cinder.conf keystone_authtoken user_domain_name defaul
 crudini --set /etc/cinder/cinder.conf keystone_authtoken project_name service
 crudini --set /etc/cinder/cinder.conf keystone_authtoken username cinder
 crudini --set /etc/cinder/cinder.conf keystone_authtoken password $CINDER_PASS
-crudini --set /etc/cinder/cinder.conf keystone_authtoken insecure true
 crudini --set /etc/cinder/cinder.conf oslo_concurrency lock_path /var/lib/cinder/tmp
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream cinder-api {\
-        server 127.0.0.1:8776;\
-    }\
-    server {\
-        listen '$NOVA_IP':8776 ssl;\
-        proxy_pass cinder-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Инициализация БД cinder"
 
@@ -1626,15 +557,12 @@ echo "Добавление Cinder в исключения firewall"
 firewall-cmd --add-port=8776/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск сервиса Nginx"
-
-systemctl restart nginx
-
-echo "Запуск openstack-cinder-api, openstack-cinder-scheduler"
+echo "Запуск openstack-cinder-api, openstack-cinder-scheduler, openstack-cinder-volume и openstack-cinder-backup"
 
 systemctl enable --now openstack-cinder-api
 systemctl enable --now openstack-cinder-scheduler
 }
+
 
 
 function cinder_storage_config() {
@@ -1657,11 +585,11 @@ crudini --set /etc/cinder/cinder.conf DEFAULT api_paste_confg /etc/cinder/api-pa
 crudini --set /etc/cinder/cinder.conf DEFAULT auth_strategy keystone
 crudini --set /etc/cinder/cinder.conf DEFAULT transport_url rabbit://cinder:$CINDER_PASS@$NOVA_HOSTNAME
 crudini --set /etc/cinder/cinder.conf DEFAULT enable_v3_api true
-crudini --set /etc/cinder/cinder.conf DEFAULT glance_api_servers https://$NOVA_HOSTNAME:9292
+crudini --set /etc/cinder/cinder.conf DEFAULT glance_api_servers http://$NOVA_HOSTNAME:9292
 crudini --set /etc/cinder/cinder.conf DEFAULT enabled_backends lvm
 crudini --set /etc/cinder/cinder.conf DEFAULT backup_driver cinder.backup.drivers.nfs.NFSBackupDriver
 crudini --set /etc/cinder/cinder.conf DEFAULT backup_mount_point_base /var/lib/cinder/backup_nfs
-crudini --set /etc/cinder/cinder.conf DEFAULT backup_share $BACKUP_HOSTNAME:/backup/nfs
+crudini --set /etc/cinder/cinder.conf DEFAULT backup_share $NFS_HOSTNAME:/backup/nfs
 crudini --set /etc/cinder/cinder.conf DEFAULT state_path /var/lib/cinder
 crudini --set /etc/cinder/cinder.conf lvm target_helper lioadm
 crudini --set /etc/cinder/cinder.conf lvm target_protocol iscsi
@@ -1670,8 +598,8 @@ crudini --set /etc/cinder/cinder.conf lvm volume_group cinder-volumes
 crudini --set /etc/cinder/cinder.conf lvm volume_driver cinder.volume.drivers.lvm.LVMVolumeDriver
 crudini --set /etc/cinder/cinder.conf lvm volumes_dir /var/lib/cinder/volumes
 crudini --set /etc/cinder/cinder.conf database connection mysql+pymysql://cinder:$CINDER_PASS@$NOVA_HOSTNAME/cinder
-crudini --set /etc/cinder/cinder.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/cinder/cinder.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/cinder/cinder.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/cinder/cinder.conf keystone_authtoken auth_type password
 crudini --set /etc/cinder/cinder.conf keystone_authtoken project_domain_name default
@@ -1679,7 +607,6 @@ crudini --set /etc/cinder/cinder.conf keystone_authtoken user_domain_name defaul
 crudini --set /etc/cinder/cinder.conf keystone_authtoken project_name service
 crudini --set /etc/cinder/cinder.conf keystone_authtoken username cinder
 crudini --set /etc/cinder/cinder.conf keystone_authtoken password $CINDER_PASS
-crudini --set /etc/cinder/cinder.conf keystone_authtoken insecure true
 crudini --set /etc/cinder/cinder.conf oslo_concurrency lock_path /var/lib/cinder/tmp
 
 echo "Изменение политик SELinux касательно Cinder"
@@ -1795,6 +722,8 @@ chown -R cinder. /var/lib/cinder/backup_nfs
 }
 
 
+
+
 function nfs_storage_config() {
 
 echo -e "\033[1mНАСТРОЙКА NFS-СЕРВЕРА\033[0m"
@@ -1820,6 +749,7 @@ echo "Запуск nfs-server и rpcbind"
 
 systemctl enable --now nfs-server rpcbind
 }
+
 
 
 function cinder_compute_config() {
@@ -1857,19 +787,818 @@ systemctl enable --now iscsid
 }
 
 
+function nova_controller_config() {
+
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Nova И Placement\033[0m"
+
+echo "Создание пользователя nova"
+
+source ~/keystonerc_adm
+openstack user create --domain default --project service --password $NOVA_PASS nova
+
+echo "Присваивание пользователю nova роли admin в проекте serivce"
+
+openstack role add --project service --user nova admin 
+
+echo "Создание пользователя placement"
+
+openstack user create --domain default --project service --password $PLACEMENT_PASS placement
+
+echo "Присваивание пользователю placement роли admin в проекте serivce"
+
+openstack role add --project service --user placement admin 
+
+echo "Создание сервиса nova"
+
+openstack service create --name nova --description "Compute Service" compute
+
+echo "Создание сервиса placement"
+
+openstack service create --name placement --description "Compute Placement Service" placement
+
+echo "Создание точек входа в сервиса nova"
+
+openstack endpoint create --region RegionOne compute public http://$NOVA_HOSTNAME:8774/v2.1
+openstack endpoint create --region RegionOne compute internal http://$NOVA_HOSTNAME:8774/v2.1
+openstack endpoint create --region RegionOne compute admin http://$NOVA_HOSTNAME:8774/v2.1
+
+echo "Создание точек входа в сервиса placement"
+
+openstack endpoint create --region RegionOne placement public http://$NOVA_HOSTNAME:8778
+openstack endpoint create --region RegionOne placement internal http://$NOVA_HOSTNAME:8778
+openstack endpoint create --region RegionOne placement admin http://$NOVA_HOSTNAME:8778
+
+echo "Создание трех БД (nova, nova_api и nova_cell0)для сервиса Nova"
+
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova_api;"
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova;"
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE nova_cell0;"
+
+echo "Выдача прав на работу с БД пользователю nova"
+
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' IDENTIFIED BY '$NOVA_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
+
+echo "Создание БД для сервиса Placement"
+
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE placement;"
+
+echo "Выдача прав на работу с БД пользователю placement"
+
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' IDENTIFIED BY '$PLACEMENT_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' IDENTIFIED BY '$PLACEMENT_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
+
+echo "Создание пользователя nova в RabbitMQ"
+
+rabbitmqctl add_user nova $NOVA_PASS
+
+echo "Выдача созданному RabbitMQ пользователю всех разрешений"
+
+rabbitmqctl set_permissions nova ".*" ".*" ".*"
+
+echo "Установка служб необходимых для работы сервиса Nova и Placement"
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-nova openstack-placement-api 
+
+echo "Редактирование конфига /etc/nova/nova.conf"
+
+crudini --set /etc/nova/nova.conf DEFAULT my_ip $HOST_IP
+crudini --set /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
+crudini --set /etc/nova/nova.conf DEFAULT transport_url rabbit://nova:$NOVA_PASS@$NOVA_HOSTNAME
+crudini --set /etc/nova/nova.conf DEFAULT log_dir /var/log/nova
+crudini --set /etc/nova/nova.conf DEFAULT state_path /var/lib/nova
+crudini --set /etc/nova/nova.conf DEFAULT instances_path /var/lib/nova/instances
+crudini --set /etc/nova/nova.conf api auth_strategy keystone
+crudini --set /etc/nova/nova.conf vnc enabled true
+crudini --set /etc/nova/nova.conf vnc server_listen $HOST_IP
+crudini --set /etc/nova/nova.conf vnc server_proxyclient_address $HOST_IP
+crudini --set /etc/nova/nova.conf glance api_servers http://$NOVA_HOSTNAME:9292
+crudini --set /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
+crudini --set /etc/nova/nova.conf api_database connection mysql+pymysql://nova:$NOVA_PASS@$NOVA_HOSTNAME/nova_api
+crudini --set /etc/nova/nova.conf database connection mysql+pymysql://nova:$NOVA_PASS@$NOVA_HOSTNAME/nova
+crudini --set /etc/nova/nova.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/nova/nova.conf keystone_authtoken auth_type password
+crudini --set /etc/nova/nova.conf keystone_authtoken project_domain_name default
+crudini --set /etc/nova/nova.conf keystone_authtoken user_domain_name default
+crudini --set /etc/nova/nova.conf keystone_authtoken project_name service
+crudini --set /etc/nova/nova.conf keystone_authtoken username nova
+crudini --set /etc/nova/nova.conf keystone_authtoken password $NOVA_PASS
+crudini --set /etc/nova/nova.conf placement auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf placement region_name RegionOne
+crudini --set /etc/nova/nova.conf placement auth_type password
+crudini --set /etc/nova/nova.conf placement project_domain_name default
+crudini --set /etc/nova/nova.conf placement user_domain_name default
+crudini --set /etc/nova/nova.conf placement project_name service
+crudini --set /etc/nova/nova.conf placement username placement
+crudini --set /etc/nova/nova.conf placement password $PLACEMENT_PASS
+crudini --set /etc/nova/nova.conf wsgi api_paste_config /etc/nova/api-paste.ini
+
+echo "Редактирование конфига /etc/placement/placement.conf"
+
+crudini --set /etc/placement/placement.conf DEFAULT debug false 
+crudini --set /etc/placement/placement.conf api auth_strategy keystone
+crudini --set /etc/placement/placement.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/placement/placement.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/placement/placement.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/placement/placement.conf keystone_authtoken auth_type password
+crudini --set /etc/placement/placement.conf keystone_authtoken project_domain_name default
+crudini --set /etc/placement/placement.conf keystone_authtoken user_domain_name default
+crudini --set /etc/placement/placement.conf keystone_authtoken project_name service
+crudini --set /etc/placement/placement.conf keystone_authtoken username placement
+crudini --set /etc/placement/placement.conf keystone_authtoken password $PLACEMENT_PASS
+crudini --set /etc/placement/placement.conf placement_database connection mysql+pymysql://placement:$PLACEMENT_PASS@$NOVA_HOSTNAME/placement
+
+echo "Редактирование кофига /etc/httpd/conf.d/00-placement-api.conf"
+
+sed -i -c '/\/VirtualHost/i \
+  <Directory /usr/bin>\
+    Require all granted\
+  </Directory>' /etc/httpd/conf.d/00-placement-api.conf 
+  
+echo "Выдача прав на папку с логами сервису Placement"
+
+chown placement. /var/log/placement/
+  
+echo "Инициализация БД placement"
+
+su -s /bin/bash placement -c "placement-manage db sync" 
+
+echo "Инициализация БД nova_api"
+
+su -s /bin/bash nova -c "nova-manage api_db sync" 
+
+echo "Регистрация БД nova-cell0 в БД nova_api"
+
+su -s /bin/bash nova -c "nova-manage cell_v2 map_cell0"
+
+echo "Инициализация БД nova"
+
+su -s /bin/bash nova -c "nova-manage db sync"
+
+echo "Создание ячейки cell1 в БД nova_api"
+
+su -s /bin/bash nova -c "nova-manage cell_v2 create_cell --name cell1"
+
+echo "Уствновка openstack-selinux"
+
+dnf --enablerepo=centos-openstack-zed -y install openstack-selinux
+
+echo "Изменение политик SELinux касательно Placement"
+
+semanage port -a -t http_port_t -p tcp 8778
+
+echo "Изменение политик SELinux касательно Nova"
+
+cat << EOF > novaapi.te
+module novaapi 1.0;
+
+require {
+        type rpm_exec_t;
+        type hostname_exec_t;
+        type nova_t;
+        type nova_var_lib_t;
+        type virtlogd_t;
+        type geneve_port_t;
+        type mysqld_exec_t;
+        type mysqld_safe_exec_t;
+        type gpg_exec_t;
+        type crontab_exec_t;
+        type consolehelper_exec_t;
+        type keepalived_exec_t;
+        class dir { add_name remove_name search write };
+        class file { append create getattr open unlink };
+        class capability dac_override;
+
+}
+
+#============= nova_t ==============
+allow nova_t mysqld_exec_t:file getattr;
+allow nova_t mysqld_safe_exec_t:file getattr;
+allow nova_t gpg_exec_t:file getattr;
+allow nova_t hostname_exec_t:file getattr;
+allow nova_t rpm_exec_t:file getattr;
+allow nova_t consolehelper_exec_t:file getattr;
+allow nova_t crontab_exec_t:file getattr;
+allow nova_t keepalived_exec_t:file getattr;
+
+#============= virtlogd_t ==============
+allow virtlogd_t nova_var_lib_t:dir { add_name remove_name search write };
+allow virtlogd_t nova_var_lib_t:file { append create getattr open unlink };
+allow virtlogd_t self:capability dac_override;
+EOF
+checkmodule -m -M -o novaapi.mod novaapi.te
+semodule_package --outfile novaapi.pp --module novaapi.mod
+semodule -i novaapi.pp
+
+echo "Добавление Nova и Placement в исключения firewall"
+
+firewall-cmd --add-port={6080/tcp,6081/tcp,6082/tcp,8774/tcp,8775/tcp,8778/tcp}
+firewall-cmd --runtime-to-permanent
+
+echo "Перезапуск httpd"
+
+systemctl restart httpd
+
+echo "Запуск openstack-nova-api openstack-nova-conductor openstack-nova-scheduler openstack-nova-novncproxy"
+
+systemctl enable --now openstack-nova-api
+systemctl enable --now openstack-nova-conductor
+systemctl enable --now openstack-nova-scheduler
+systemctl enable --now openstack-nova-novncproxy
+
+echo "Регистрация гипервизоров рабочих узлов, если они есть"
+
+su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+}
+
+
+
+function nova_compute_config() {
+
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Nova\033[0m"
+
+echo "Установка служб необходимых для работы сервиса гипервизора KVM"
+
+dnf -y install qemu-kvm libvirt virt-install
+
+echo "Запуск libvirtd"
+
+systemctl enable --now libvirtd
+
+echo "установка службы openstack-nova-compute" 
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-nova-compute
+
+echo "Редактирование конфига /etc/nova/nova.conf"
+
+crudini --set /etc/nova/nova.conf DEFAULT my_ip $HOST_IP
+crudini --set /etc/nova/nova.conf DEFAULT enabled_apis osapi_compute,metadata
+crudini --set /etc/nova/nova.conf DEFAULT transport_url rabbit://nova:$NOVA_PASS@$NOVA_HOSTNAME
+crudini --set /etc/nova/nova.conf DEFAULT log_dir /var/log/nova
+crudini --set /etc/nova/nova.conf DEFAULT compute_driver libvirt.LibvirtDriver
+crudini --set /etc/nova/nova.conf DEFAULT state_path /var/lib/nova
+crudini --set /etc/nova/nova.conf api auth_strategy keystone
+crudini --set /etc/nova/nova.conf vnc enabled true 
+crudini --set /etc/nova/nova.conf vnc novncproxy_base_url http://$NOVA_HOSTNAME:6080/vnc_auto.html
+crudini --set /etc/nova/nova.conf vnc server_listen 0.0.0.0
+crudini --set /etc/nova/nova.conf vnc server_proxyclient_address $HOST_IP
+crudini --set /etc/nova/nova.conf glance api_servers http://$NOVA_HOSTNAME:9292
+crudini --set /etc/nova/nova.conf oslo_concurrency lock_path /var/lib/nova/tmp
+crudini --set /etc/nova/nova.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/nova/nova.conf keystone_authtoken auth_type password
+crudini --set /etc/nova/nova.conf keystone_authtoken project_domain_name default
+crudini --set /etc/nova/nova.conf keystone_authtoken user_domain_name default
+crudini --set /etc/nova/nova.conf keystone_authtoken project_name service
+crudini --set /etc/nova/nova.conf keystone_authtoken username nova
+crudini --set /etc/nova/nova.conf keystone_authtoken password $NOVA_PASS
+crudini --set /etc/nova/nova.conf placement auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf placement region_name RegionOne
+crudini --set /etc/nova/nova.conf placement auth_type password
+crudini --set /etc/nova/nova.conf placement project_domain_name default
+crudini --set /etc/nova/nova.conf placement user_domain_name default
+crudini --set /etc/nova/nova.conf placement project_name service
+crudini --set /etc/nova/nova.conf placement username placement
+crudini --set /etc/nova/nova.conf placement password $PLACEMENT_PASS
+crudini --set /etc/nova/nova.conf wsgi api_paste_config /etc/nova/api-paste.ini
+
+echo "Установка openstack-selinux"
+
+dnf --enablerepo=centos-openstack-zed -y install openstack-selinux
+
+echo "Добавление Nova в исключения firewall"
+
+firewall-cmd --add-port=5900-5999/tcp
+firewall-cmd --runtime-to-permanent
+
+echo "Запуск openstack-nova-compute"
+
+systemctl enable --now openstack-nova-compute
+}
+
+
+
+
+function neutron_controller_config() {
+
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
+
+echo "Создание пользователя neutron"
+
+source ~/keystonerc_adm
+openstack user create --domain default --project service --password $NEUTRON_PASS neutron
+
+echo "Присваивание пользователю neutron роли admin в проекте serivce"
+
+openstack role add --project service --user neutron admin 
+
+echo "Создание сервиса neutron"
+
+openstack service create --name neutron --description "Networking Service" network
+
+echo "Создание точек входа в сервиса neutron"
+
+openstack endpoint create --region RegionOne network public http://$NOVA_HOSTNAME:9696
+openstack endpoint create --region RegionOne network internal http://$NOVA_HOSTNAME:9696
+openstack endpoint create --region RegionOne network admin http://$NOVA_HOSTNAME:9696
+
+echo "Создание БД для сервиса Neutron"
+
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE neutron;"
+
+echo "Выдача прав на работу с БД пользователю neutron"
+
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '$NEUTRON_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY '$NEUTRON_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
+
+echo "Создание пользователя neutron в RabbitMQ"
+
+rabbitmqctl add_user neutron $NEUTRON_PASS
+
+echo "Выдача созданному RabbitMQ пользователю всех разрешений"
+
+rabbitmqctl set_permissions neutron ".*" ".*" ".*"
+
+echo "Редактирование конфига /etc/nova/nova.conf"
+
+crudini --set /etc/nova/nova.conf neutron auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf neutron auth_type password
+crudini --set /etc/nova/nova.conf neutron project_domain_name default
+crudini --set /etc/nova/nova.conf neutron user_domain_name default
+crudini --set /etc/nova/nova.conf neutron region_name RegionOne
+crudini --set /etc/nova/nova.conf neutron project_name service
+crudini --set /etc/nova/nova.conf neutron username neutron
+crudini --set /etc/nova/nova.conf neutron password $NEUTRON_PASS
+crudini --set /etc/nova/nova.conf neutron service_metadata_proxy true
+crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret $METADATA_SECRET
+
+echo "Перезапуск openstack-nova-api"
+
+systemctl restart openstack-nova-api
+}
+
+
+
+
+
+
+function neutron_network_config() {
+
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
+
+echo "Установка служб необходимых для работы сервиса Neutron"
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-neutron openstack-neutron-ml2 ovn-2021-central
+
+echo "Редактирование конфига /etc/neutron/neutron.conf"
+
+crudini --set /etc/neutron/neutron.conf DEFAULT core_plugin ml2
+crudini --set /etc/neutron/neutron.conf DEFAULT service_plugins ovn-router
+crudini --set /etc/neutron/neutron.conf DEFAULT transport_url rabbit://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME
+crudini --set /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
+crudini --set /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
+crudini --set /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes true
+crudini --set /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes true
+crudini --set /etc/neutron/neutron.conf DEFAULT state_path /var/lib/neutron
+crudini --set /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/neutron/neutron.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_type password
+crudini --set /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
+crudini --set /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
+crudini --set /etc/neutron/neutron.conf keystone_authtoken project_name service
+crudini --set /etc/neutron/neutron.conf keystone_authtoken username neutron
+crudini --set /etc/neutron/neutron.conf keystone_authtoken password $NEUTRON_PASS
+crudini --set /etc/neutron/neutron.conf database connection mysql+pymysql://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME/neutron
+crudini --set /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+crudini --set /etc/neutron/neutron.conf nova auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/neutron/neutron.conf nova auth_type password
+crudini --set /etc/neutron/neutron.conf nova project_domain_name default
+crudini --set /etc/neutron/neutron.conf nova user_domain_name default
+crudini --set /etc/neutron/neutron.conf nova region_name RegionOne
+crudini --set /etc/neutron/neutron.conf nova project_name service
+crudini --set /etc/neutron/neutron.conf nova username nova
+crudini --set /etc/neutron/neutron.conf nova password $NOVA_PASS
+
+echo "Редактирование конфига /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,geneve
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types geneve
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers ovn
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 overlay_ip_version 4
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks *
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_geneve vni_ranges 1:65536
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_geneve max_header_size 38
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup enable_security_group true
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup firewall_driver neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_nb_connection tcp:$NEUTRON_IP:6641
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_sb_connection tcp:$NEUTRON_IP:6642
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_l3_scheduler leastloaded
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_metadata_enabled true
+
+echo "Редактирование конфига /etc/sysconfig/openvswitch"
+
+sed -c -i 's/OPTIONS=/"/"/OPTIONS=/"--ovsdb-server-options=/'--remote=ptcp:6640:127.0.0.1/'/"/' /etc/sysconfig/openvswitch
+
+echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+
+echo "Инициализация БД neutron"
+
+su -s /bin/bash neutron -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugin.ini upgrade head"
+
+echo "Установка openstack-selinux"
+
+dnf --enablerepo=centos-openstack-zed -y install openstack-selinux 
+
+echo "Изменение политик SELinux касательно Neutron"
+
+setsebool -P neutron_can_network on
+setsebool -P haproxy_connect_any on 
+setsebool -P daemons_enable_cluster_mode on
+cat << EOF > ovsofctl.te
+module ovsofctl 1.0;
+
+require {
+        type neutron_t;
+        type neutron_exec_t;
+        type dnsmasq_t;
+        type openvswitch_load_module_t;
+        type tracefs_t;
+        type var_run_t;
+        type openvswitch_t;
+        type ovsdb_port_t;
+        type kdumpctl_exec_t;
+        type devicekit_exec_t;
+        type lsmd_exec_t;
+        type lsmd_plugin_exec_t;
+        type locate_exec_t;
+        type glance_scrubber_exec_t;
+        type gpg_agent_exec_t;
+        type mount_exec_t;
+        type rsync_exec_t;
+        type journalctl_exec_t;
+        type virt_qemu_ga_exec_t;
+        type httpd_config_t;
+        type chfn_exec_t;
+        type glance_api_exec_t;
+        type ssh_exec_t;
+        type ssh_agent_exec_t;
+        type systemd_hwdb_exec_t;
+        type checkpolicy_exec_t;
+        type chronyc_exec_t;
+        type groupadd_exec_t;
+        type loadkeys_exec_t;
+        type fusermount_exec_t;
+        type dmesg_exec_t;
+        type rpmdb_exec_t;
+        type memcached_exec_t;
+        type conmon_exec_t;
+        type systemd_tmpfiles_exec_t;
+        type passwd_exec_t;
+        type ssh_keygen_exec_t;
+        type NetworkManager_exec_t;
+        type su_exec_t;
+        type dbusd_exec_t;
+        type numad_exec_t;
+        type container_runtime_exec_t;
+        type ping_exec_t;
+        type rpcbind_exec_t;
+        type virtd_exec_t;
+        type policykit_auth_exec_t;
+        type systemd_systemctl_exec_t;
+        type plymouth_exec_t;
+        type keepalived_exec_t;
+        type mandb_exec_t;
+        type systemd_passwd_agent_exec_t;
+        type traceroute_exec_t;
+        type fsadm_exec_t;
+        type thumb_exec_t;
+        type mysqld_exec_t;
+        type nova_exec_t;
+        type crontab_exec_t;
+        type swtpm_exec_t;
+        type virsh_exec_t;
+        type mysqld_safe_exec_t;
+        type systemd_notify_exec_t;
+        type vlock_exec_t;
+        type gpg_exec_t;
+        type login_exec_t;
+        type hostname_exec_t;
+        type tmpfs_t;
+        class sock_file write;
+        class file { execute_no_trans getattr create read write open link unlink };
+        class dir search;
+        class tcp_socket name_bind;
+        class capability { dac_override sys_rawio };
+}
+
+#============= neutron_t ==============
+allow neutron_t self:capability { dac_override sys_rawio };
+allow neutron_t neutron_exec_t:file execute_no_trans;
+allow neutron_t NetworkManager_exec_t:file getattr;
+allow neutron_t checkpolicy_exec_t:file getattr;
+allow neutron_t chfn_exec_t:file getattr;
+allow neutron_t chronyc_exec_t:file getattr;
+allow neutron_t conmon_exec_t:file getattr;
+allow neutron_t container_runtime_exec_t:file getattr;
+allow neutron_t crontab_exec_t:file getattr;
+allow neutron_t dbusd_exec_t:file getattr;
+allow neutron_t devicekit_exec_t:file getattr;
+allow neutron_t dmesg_exec_t:file getattr;
+allow neutron_t fsadm_exec_t:file getattr;
+allow neutron_t fusermount_exec_t:file getattr;
+allow neutron_t glance_api_exec_t:file getattr;
+allow neutron_t glance_scrubber_exec_t:file getattr;
+allow neutron_t gpg_agent_exec_t:file getattr;
+allow neutron_t gpg_exec_t:file getattr;
+allow neutron_t groupadd_exec_t:file getattr;
+allow neutron_t hostname_exec_t:file getattr;
+allow neutron_t httpd_config_t:dir search;
+allow neutron_t journalctl_exec_t:file getattr;
+allow neutron_t kdumpctl_exec_t:file getattr;
+allow neutron_t keepalived_exec_t:file getattr;
+allow neutron_t loadkeys_exec_t:file getattr;
+allow neutron_t locate_exec_t:file getattr;
+allow neutron_t login_exec_t:file getattr;
+allow neutron_t lsmd_exec_t:file getattr;
+allow neutron_t lsmd_plugin_exec_t:file getattr;
+allow neutron_t mandb_exec_t:file getattr;
+allow neutron_t memcached_exec_t:file getattr;
+allow neutron_t mount_exec_t:file getattr;
+allow neutron_t mysqld_exec_t:file getattr;
+allow neutron_t mysqld_safe_exec_t:file getattr;
+allow neutron_t nova_exec_t:file getattr;
+allow neutron_t numad_exec_t:file getattr;
+allow neutron_t passwd_exec_t:file getattr;
+allow neutron_t ping_exec_t:file getattr;
+allow neutron_t plymouth_exec_t:file getattr;
+allow neutron_t policykit_auth_exec_t:file getattr;
+allow neutron_t rpcbind_exec_t:file getattr;
+allow neutron_t rpmdb_exec_t:file getattr;
+allow neutron_t rsync_exec_t:file getattr;
+allow neutron_t ssh_agent_exec_t:file getattr;
+allow neutron_t ssh_exec_t:file getattr;
+allow neutron_t ssh_keygen_exec_t:file getattr;
+allow neutron_t su_exec_t:file getattr;
+allow neutron_t swtpm_exec_t:file getattr;
+allow neutron_t systemd_hwdb_exec_t:file getattr;
+allow neutron_t systemd_notify_exec_t:file getattr;
+allow neutron_t systemd_passwd_agent_exec_t:file getattr;
+allow neutron_t systemd_systemctl_exec_t:file getattr;
+allow neutron_t systemd_tmpfiles_exec_t:file getattr;
+allow neutron_t thumb_exec_t:file getattr;
+allow neutron_t traceroute_exec_t:file getattr;
+allow neutron_t virsh_exec_t:file getattr;
+allow neutron_t virt_qemu_ga_exec_t:file getattr;
+allow neutron_t virtd_exec_t:file getattr;
+allow neutron_t vlock_exec_t:file getattr;
+allow neutron_t tmpfs_t:file { create read write open link getattr unlink };
+
+#============= openvswitch_t ==============
+allow openvswitch_t var_run_t:sock_file write;
+allow openvswitch_t ovsdb_port_t:tcp_socket name_bind;
+
+#============= openvswitch_load_module_t ==============
+allow openvswitch_load_module_t tracefs_t:dir search;
+
+#============= dnsmasq_t ==============
+allow dnsmasq_t self:capability dac_override;
+EOF
+checkmodule -m -M -o ovsofctl.mod ovsofctl.te
+semodule_package --outfile ovsofctl.pp --module ovsofctl.mod
+semodule -i ovsofctl.pp
+
+echo "Добавление Neutron в исключения firewall"
+
+firewall-cmd --add-port={9696/tcp,6641/tcp,6642/tcp}
+firewall-cmd --runtime-to-permanent
+
+echo "Запуск openvswitch"
+
+systemctl enable --now openvswitch
+
+echo "Создание моста br-int"
+
+ovs-vsctl add-br br-int
+
+echo "Запуск ovn-northd"
+
+systemctl enable --now ovn-northd
+
+echo "Создание соединений для северного и южного моста"
+
+ovn-nbctl set-connection ptcp:6641:$NEUTRON_IP -- set connection . inactivity_probe=60000
+
+ovn-sbctl set-connection ptcp:6642:$NEUTRON_IP -- set connection . inactivity_probe=60000 
+
+echo "Добавление моста br-ex с помощью OpenvSwitch"
+
+ovs-vsctl add-br br-ex
+
+echo "Мапим мост br-ex на сетевой интерфейс enp*s0"
+
+enp=$(ip a | grep -E "enp[0-9]s0:" | grep -Eo "enp[2-9]s0")
+
+ovs-vsctl add-port br-ex $enp
+
+echo "Задаем название провайдера сети"
+
+ovs-vsctl set open . external-ids:ovn-bridge-mappings=external:br-ex
+
+echo "Запуск neutron-server"
+
+systemctl enable --now neutron-server
+
+}
+
+
+
+
+
+function neutron_compute_config() {
+
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Neutron\033[0m"
+
+echo "Установка служб необходимых для работы сервиса Neutron"
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-neutron openstack-neutron-ml2 openstack-neutron-ovn-metadata-agent ovn-2021-host
+
+echo "Редактирование конфига /etc/neutron/neutron.conf"
+
+crudini --set /etc/neutron/neutron.conf DEFAULT core_plugin ml2
+crudini --set /etc/neutron/neutron.conf DEFAULT service_plugins ovn-router
+crudini --set /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips true
+crudini --set /etc/neutron/neutron.conf DEFAULT transport_url rabbit://neutron:$NEUTRON_PASS@$NOVA_HOSTNAME
+crudini --set /etc/neutron/neutron.conf DEFAULT auth_strategy keystone
+crudini --set /etc/neutron/neutron.conf DEFAULT state_path /var/lib/neutron
+crudini --set /etc/neutron/neutron.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/neutron/neutron.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/neutron/neutron.conf keystone_authtoken auth_type password
+crudini --set /etc/neutron/neutron.conf keystone_authtoken project_domain_name default
+crudini --set /etc/neutron/neutron.conf keystone_authtoken user_domain_name default
+crudini --set /etc/neutron/neutron.conf keystone_authtoken project_name service
+crudini --set /etc/neutron/neutron.conf keystone_authtoken username neutron
+crudini --set /etc/neutron/neutron.conf keystone_authtoken password $NEUTRON_PASS
+crudini --set /etc/neutron/neutron.conf oslo_concurrency lock_path /var/lib/neutron/tmp
+
+echo "Редактирование конфига /etc/sysconfig/openvswitch"
+
+sed -c -i 's/OPTIONS=/"/"/OPTIONS=/"--ovsdb-server-options=/'--remote=ptcp:6640:127.0.0.1/'/"/' /etc/sysconfig/openvswitch
+
+echo "Редактирование конфига /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,geneve
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types geneve
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers ovn
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 overlay_ip_version 4
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks *
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_geneve vni_ranges 1:65536
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_geneve max_header_size 38
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup enable_security_group true
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup firewall_driver neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_nb_connection tcp:$NEUTRON_IP:6641
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_sb_connection tcp:$NEUTRON_IP:6642
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_l3_scheduler leastloaded
+crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_metadata_enabled true
+
+echo "Редактирование конфига /etc/nova/nova.conf"
+
+crudini --set /etc/nova/nova.conf DEFAULT vif_plugging_is_fatal true
+crudini --set /etc/nova/nova.conf DEFAULT vif_plugging_timeout 300
+crudini --set /etc/nova/nova.conf neutron auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/nova/nova.conf neutron auth_type password
+crudini --set /etc/nova/nova.conf neutron project_domain_name default
+crudini --set /etc/nova/nova.conf neutron user_domain_name default
+crudini --set /etc/nova/nova.conf neutron region_name RegionOne
+crudini --set /etc/nova/nova.conf neutron project_name service
+crudini --set /etc/nova/nova.conf neutron username neutron
+crudini --set /etc/nova/nova.conf neutron password $NEUTRON_PASS
+crudini --set /etc/nova/nova.conf neutron service_metadata_proxy true
+crudini --set /etc/nova/nova.conf neutron metadata_proxy_shared_secret $METADATA_SECRET
+
+echo "Редактирование конфига /etc/neutron/neutron_ovn_metadata_agent.ini"
+
+crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini DEFAULT nova_metadata_host $NOVA_HOSTNAME
+crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini DEFAULT metadata_proxy_shared_secret $METADATA_SECRET
+crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini agent root_helper "sudo neutron-rootwrap /etc/neutron/rootwrap.conf"
+crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini ovs ovsdb_connection tcp:127.0.0.1:6640
+crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini ovn ovn_sb_connection tcp:$NEUTRON_IP:6642
+
+echo "Установка openstack-selinux"
+
+dnf --enablerepo=centos-openstack-zed -y install openstack-selinux 
+
+echo "Изменение политик SELinux касательно Neutron"
+
+setsebool -P neutron_can_network on
+setsebool -P daemons_enable_cluster_mode on
+cat << EOF > ovsofctl.te
+module ovsofctl 1.0;
+
+require {
+        type neutron_t;
+        type neutron_exec_t;
+        type neutron_t;
+        type dnsmasq_t;
+        type openvswitch_load_module_t;
+        type tracefs_t;
+        type var_run_t;
+        type openvswitch_t;
+        type ovsdb_port_t;
+        class sock_file write;
+        class file execute_no_trans;
+        class dir search;
+        class tcp_socket name_bind;
+        class capability { dac_override sys_rawio };
+}
+
+#============= neutron_t ==============
+allow neutron_t self:capability { dac_override sys_rawio };
+allow neutron_t neutron_exec_t:file execute_no_trans;
+
+#============= openvswitch_t ==============
+allow openvswitch_t var_run_t:sock_file write;
+allow openvswitch_t ovsdb_port_t:tcp_socket name_bind;
+
+#============= openvswitch_load_module_t ==============
+allow openvswitch_load_module_t tracefs_t:dir search;
+
+#============= dnsmasq_t ==============
+allow dnsmasq_t self:capability dac_override;
+EOF
+checkmodule -m -M -o ovsofctl.mod ovsofctl.te
+semodule_package --outfile ovsofctl.pp --module ovsofctl.mod
+semodule -i ovsofctl.pp
+
+echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+
+echo "Запуск openvswitch и ovn-controller"
+
+systemctl enable --now openvswitch
+systemctl enable --now ovn-controller
+
+echo "Конфигурирование OVN соединений"
+
+ovs-vsctl set open . external-ids:ovn-remote=tcp:$NEUTRON_IP:6642 
+ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+ovs-vsctl set open . external-ids:ovn-encap-ip=$HOST_IP
+
+echo "Добавление моста br-ex с помощью OpenvSwitch"
+
+ovs-vsctl add-br br-ex
+
+echo "Мапим мост br-ex на сетевой интерфейс enp*s0"
+
+enp=$(ip a | grep -E "enp[0-9]s0:" | grep -Eo "enp[2-9]s0")
+
+ovs-vsctl add-port br-ex $enp
+
+echo "Задаем название провайдера сети"
+
+ovs-vsctl set open . external-ids:ovn-bridge-mappings=external:br-ex
+
+echo "Перезапуск openstack-nova-compute"
+
+systemctl restart openstack-nova-compute
+
+echo "Запуск neutron-ovn-metadata-agent "
+
+systemctl enable --now neutron-ovn-metadata-agent 
+}
+
+
+
+
 function horizon_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Horizon\033[0m"
 
 echo "Установка сервиса Horizon"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-dashboard httpd
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-dashboard
 
 echo "Редактирование конфига /etc/openstack-dashboard/local_settings"
 
 crudini --set /etc/openstack-dashboard/local_settings "" OPENSTACK_HOST "\"$NOVA_HOSTNAME\""
 crudini --set /etc/openstack-dashboard/local_settings "" ALLOWED_HOSTS ["'*'"]
-crudini --set /etc/openstack-dashboard/local_settings "" OPENSTACK_KEYSTONE_URL "\"https://$NOVA_HOSTNAME:5000\""
+crudini --set /etc/openstack-dashboard/local_settings "" OPENSTACK_KEYSTONE_URL "\"http://$NOVA_HOSTNAME:5000\""
 crudini --set /etc/openstack-dashboard/local_settings "" TIME_ZONE "\"$TIME_ZONE\""
 cat << EOF >> /etc/openstack-dashboard/local_settings
 SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
@@ -1891,7 +1620,6 @@ WEBROOT = '/dashboard/'
 LOGIN_URL = '/dashboard/auth/login/'
 LOGOUT_URL = '/dashboard/auth/logout/'
 LOGIN_REDIRECT_URL = '/dashboard/'
-OPENSTACK_SSL_NO_VERIFY = True
 EOF
 
 echo "Редактирование конфига /etc/httpd/conf.d/openstack-dashboard.conf"
@@ -1900,20 +1628,13 @@ sed -i -c '/WSGISocketPrefix/a WSGIApplicationGroup %{GLOBAL} ' /etc/httpd/conf.
 sed -i -c 's/wsgi\/django.wsgi/wsgi.py/' /etc/httpd/conf.d/openstack-dashboard.conf
 sed -i -c 's/\/wsgi>/>/' /etc/httpd/conf.d/openstack-dashboard.conf
 
-echo "Редактирование конфига /etc/httpd/conf.d/ssl.conf"
-
-sed -c -i 's/#DocumentRoot/DocumentRoot/' /etc/httpd/conf.d/ssl.conf
-sed -c -i 's/#ServerName www.example.com:443/ServerName '$NOVA_HOSTNAME':443/' /etc/httpd/conf.d/ssl.conf
-sed -c -i 's/SSLCertificateFile \/etc\/pki\/tls\/certs\/localhost.crt/SSLCertificateFile \/etc\/pki\/tls\/certs\/server.crt/' /etc/httpd/conf.d/ssl.conf
-sed -c -i 's/SSLCertificateKeyFile \/etc\/pki\/tls\/private\/localhost.key/SSLCertificateKeyFile \/etc\/pki\/tls\/certs\/server.key/' /etc/httpd/conf.d/ssl.conf
-
 echo "Изменение политик SELinux касательно Horizon"
 
 setsebool -P httpd_can_network_connect on
 
 echo "Добавление Horizon в исключения firewall"
 
-firewall-cmd --add-service={http,https}
+firewall-cmd --add-service=http
 firewall-cmd --runtime-to-permanent
 
 echo "Перезапуск httpd, memcached и openstack-nova-api"
@@ -1922,6 +1643,7 @@ systemctl restart httpd
 systemctl restart memcached
 systemctl restart openstack-nova-api
 }
+
 
 
 function telemetry_controller_config() {
@@ -1943,9 +1665,9 @@ openstack service create --name gnocchi --description "Metric Service" metric
 
 echo "Создание точек входа в сервиса gnocchi"
 
-openstack endpoint create --region RegionOne metric public https://$GNOCCHI_HOSTNAME:8041
-openstack endpoint create --region RegionOne metric internal https://$GNOCCHI_HOSTNAME:8041
-openstack endpoint create --region RegionOne metric admin https://$GNOCCHI_HOSTNAME:8041
+openstack endpoint create --region RegionOne metric public http://$GNOCCHI_HOSTNAME:8041
+openstack endpoint create --region RegionOne metric internal http://$GNOCCHI_HOSTNAME:8041
+openstack endpoint create --region RegionOne metric admin http://$GNOCCHI_HOSTNAME:8041
 
 echo "Создание пользователя ceilometer"
 
@@ -1973,9 +1695,9 @@ openstack service create --name aodh --description "Telemetry" alarming
 
 echo "Создание точек входа в сервиса aodh"
 
-openstack endpoint create --region RegionOne alarming public https://$AODH_HOSTNAME:8042
-openstack endpoint create --region RegionOne alarming internal https://$AODH_HOSTNAME:8042
-openstack endpoint create --region RegionOne alarming admin https://$AODH_HOSTNAME:8042
+openstack endpoint create --region RegionOne alarming public http://$AODH_HOSTNAME:8042
+openstack endpoint create --region RegionOne alarming internal http://$AODH_HOSTNAME:8042
+openstack endpoint create --region RegionOne alarming admin http://$AODH_HOSTNAME:8042
 
 echo "Создание БД для сервиса Aodh"
 
@@ -2040,14 +1762,13 @@ systemctl restart openstack-cinder-scheduler
 
 
 
-
 function telemetry_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Telemetry\033[0m"
 
 echo "Установка служб необходимых для работы сервиса Gnocchi"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-gnocchi-api openstack-gnocchi-metricd python3-gnocchiclient httpd python3-mod_wsgi nginx nginx-mod-stream 
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-gnocchi-api openstack-gnocchi-metricd python3-gnocchiclient httpd python3-mod_wsgi
 
 echo "Редактирование конфига /etc/gnocchi/gnocchi.conf"
 
@@ -2057,8 +1778,8 @@ crudini --set /etc/gnocchi/gnocchi.conf database backend sqlalchemy
 crudini --set /etc/gnocchi/gnocchi.conf indexer url mysql+pymysql://gnocchi:$GNOCCHI_PASS@$NOVA_HOSTNAME/gnocchi
 crudini --set /etc/gnocchi/gnocchi.conf storage file_path /var/lib/gnocchi
 crudini --set /etc/gnocchi/gnocchi.conf storage driver file
-crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
+crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_type password
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken project_domain_name default
@@ -2066,13 +1787,12 @@ crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken user_domain_name defa
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken project_name service
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken username gnocchi
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken password $GNOCCHI_PASS
-crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken insecure true
 crudini --set /etc/gnocchi/gnocchi.conf keystone_authtoken service_token_roles_required true
 
 echo "Редактирование конфига /etc/httpd/conf.d/10-gnocchi_wsgi.conf"
 
 cat << EOF > /etc/httpd/conf.d/10-gnocchi_wsgi.conf
-Listen 127.0.0.1:8041
+Listen 8041
 <VirtualHost *:8041>
   <Directory /usr/bin>
     AllowOverride None
@@ -2081,30 +1801,12 @@ Listen 127.0.0.1:8041
 
   CustomLog /var/log/httpd/gnocchi_wsgi_access.log combined
   ErrorLog /var/log/httpd/gnocchi_wsgi_error.log
-  SetEnvIf X-Forwarded-Proto https HTTPS=1
   WSGIApplicationGroup %{GLOBAL}
   WSGIDaemonProcess gnocchi display-name=gnocchi_wsgi user=gnocchi group=gnocchi processes=6 threads=6
   WSGIProcessGroup gnocchi
   WSGIScriptAlias / /usr/bin/gnocchi-api
 </VirtualHost>
 EOF
-
-if [ "$(cat /etc/nginx/nginx.conf | grep "#")" != "" ]
-
-nginx_init_config
-
-fi
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream gnocchi-api {\
-        server 127.0.0.1:8041;\
-    }\
-    server {\
-        listen '$HOST_IP':8041 ssl;\
-        proxy_pass gnocchi-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Инициализация БД gnocchi"
 
@@ -2120,12 +1822,10 @@ echo "Добавление Gnocchi в исключения firewall"
 firewall-cmd --add-port=8041/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск httpd и nginx"
+echo "Перезапуск httpd"
 
 systemctl enable --now httpd
-systemctl enable --now nginx
 systemctl restart httpd
-systemctl restart nginx
 
 echo "Запуск openstack-gnocchi-api и openstack-gnocchi-metricd"
 
@@ -2140,8 +1840,8 @@ echo "Редактирование конфига /etc/ceilometer/ceilometer.con
 crudini --set /etc/ceilometer/ceilometer.conf DEFAULT transport_url rabbit://ceilometer:$CEILOMETER_PASS@$NOVA_HOSTNAME
 crudini --set /etc/ceilometer/ceilometer.conf api auth_mode keystone
 crudini --set /etc/ceilometer/ceilometer.conf dispatcher_gnocchi filter_service_activity false
-crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
-crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
+crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken auth_type password
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken project_domain_name default
@@ -2149,8 +1849,7 @@ crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken user_domain_nam
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken project_name service
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken username gnocchi
 crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken password $GNOCCHI_PASS
-crudini --set /etc/ceilometer/ceilometer.conf keystone_authtoken insecure true
-crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_type password
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials project_domain_name default
@@ -2158,7 +1857,6 @@ crudini --set /etc/ceilometer/ceilometer.conf service_credentials user_domain_na
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials project_name service
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials username ceilometer
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials password $CEILOMETER_PASS
-crudini --set /etc/ceilometer/ceilometer.conf service_credentials insecure true
 
 echo "Синхронизация ceilometer с БД gnocchi"
 
@@ -2167,8 +1865,7 @@ su -s /bin/bash ceilometer -c "ceilometer-upgrade --skip-metering-database"
 echo "Запуск openstack-ceilometer-notification и openstack-ceilometer-central"
 
 systemctl enable --now openstack-ceilometer-central
-systemctl enable --now openstack-ceilometer-notification
-
+systemctl enable --now openstack-ceilometer-notification 
 
 echo "Установка служб необходимых для работы сервиса Aodh"
 
@@ -2179,8 +1876,8 @@ echo "Редактирование конфига /etc/aodh/aodh.conf"
 crudini --set /etc/aodh/aodh.conf DEFAULT transport_url rabbit://aodh:$AODH_PASS@$NOVA_HOSTNAME
 crudini --set /etc/aodh/aodh.conf database connection mysql+pymysql://aodh:$AODH_PASS@$NOVA_HOSTNAME/aodh
 crudini --set /etc/aodh/aodh.conf DEFAULT auth_strategy keystone
-crudini --set /etc/aodh/aodh.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/aodh/aodh.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/aodh/aodh.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/aodh/aodh.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/aodh/aodh.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/aodh/aodh.conf keystone_authtoken auth_type password
 crudini --set /etc/aodh/aodh.conf keystone_authtoken project_domain_name default
@@ -2188,20 +1885,18 @@ crudini --set /etc/aodh/aodh.conf keystone_authtoken user_domain_name default
 crudini --set /etc/aodh/aodh.conf keystone_authtoken project_name service
 crudini --set /etc/aodh/aodh.conf keystone_authtoken username aodh
 crudini --set /etc/aodh/aodh.conf keystone_authtoken password $AODH_PASS
-crudini --set /etc/aodh/aodh.conf keystone_authtoken insecure true
 crudini --set /etc/aodh/aodh.conf service_credentials auth_type password
-crudini --set /etc/aodh/aodh.conf service_credentials auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/aodh/aodh.conf service_credentials auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/aodh/aodh.conf service_credentials project_domain_name default
 crudini --set /etc/aodh/aodh.conf service_credentials user_domain_name default
 crudini --set /etc/aodh/aodh.conf service_credentials project_name service
 crudini --set /etc/aodh/aodh.conf service_credentials username aodh
 crudini --set /etc/aodh/aodh.conf service_credentials password $AODH_PASS
-crudini --set /etc/aodh/aodh.conf service_credentials insecure true
 
 echo "Редактирование конфига /etc/httpd/conf.d/10-aodh_wsgi.conf"
 
 cat << EOF > /etc/httpd/conf.d/10-aodh_wsgi.conf
-Listen 127.0.0.1:8042
+Listen 8042
 <VirtualHost *:8042>
   <Directory /usr/bin>
     AllowOverride None
@@ -2210,24 +1905,12 @@ Listen 127.0.0.1:8042
 
   CustomLog /var/log/httpd/aodh_access.log combined
   ErrorLog /var/log/httpd/aodh_error.log
-  SetEnvIf X-Forwarded-Proto https HTTPS=1
   WSGIApplicationGroup %{GLOBAL}
   WSGIDaemonProcess aodh-api display-name=aodh_wsgi user=aodh group=aodh processes=6 threads=6
   WSGIProcessGroup aodh-api
   WSGIScriptAlias / /usr/bin/aodh-api
 </VirtualHost>
 EOF
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream aodh-api {\
-        server 127.0.0.1:8042;\
-    }\
-    server {\
-        listen '$HOST_IP':8042 ssl;\
-        proxy_pass aodh-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Инициализация БД aodh"
 
@@ -2243,11 +1926,9 @@ echo "Добавление Aodh в исключения firewall"
 firewall-cmd --add-port=8042/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск nginx и httpd"
+echo "Перезапуск httpd"
 
 systemctl enable --now httpd
-systemctl enable --now nginx
-systemctl restart nginx
 systemctl restart httpd
 
 echo "Запуск openstack-aodh-api, openstack-aodh-notifier, openstack-aodh-listener и openstack-aodh-evaluator"
@@ -2256,8 +1937,6 @@ systemctl enable --now openstack-aodh-notifier
 systemctl enable --now openstack-aodh-listener
 systemctl enable --now openstack-aodh-evaluator
 }
-
-
 
 
 
@@ -2272,7 +1951,7 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-ceilometer-c
 echo "Редактирование конфига /etc/ceilometer/ceilometer.conf"
 
 crudini --set /etc/ceilometer/ceilometer.conf DEFAULT transport_url rabbit://ceilometer:$CEILOMETER_PASS@$NOVA_HOSTNAME
-crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials auth_type password
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials project_domain_name default
@@ -2280,7 +1959,6 @@ crudini --set /etc/ceilometer/ceilometer.conf service_credentials user_domain_na
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials project_name service
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials username ceilometer
 crudini --set /etc/ceilometer/ceilometer.conf service_credentials password $CEILOMETER_PASS
-crudini --set /etc/ceilometer/ceilometer.conf service_credentials insecure true
 
 echo "Редактирование конфига /etc/nova/nova.conf"
 
@@ -2297,7 +1975,6 @@ echo "Перезапуск openstack-nova-compute"
 
 systemctl restart openstack-nova-compute
 }
-
 
 
 
@@ -2337,15 +2014,15 @@ openstack service create --name heat-cfn --description "Orchestration" cloudform
 
 echo "Создание точек входа в сервиса heat"
 
-openstack endpoint create --region RegionOne orchestration public https://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
-openstack endpoint create --region RegionOne orchestration internal https://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
-openstack endpoint create --region RegionOne orchestration admin https://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
+openstack endpoint create --region RegionOne orchestration public http://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
+openstack endpoint create --region RegionOne orchestration internal http://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
+openstack endpoint create --region RegionOne orchestration admin http://$HEAT_HOSTNAME:8004/v1/%\(tenant_id\)s
 
 echo "Создание точек входа в сервиса heat-cfn"
 
-openstack endpoint create --region RegionOne cloudformation public https://$HEAT_HOSTNAME:8000/v1
-openstack endpoint create --region RegionOne cloudformation internal https://$HEAT_HOSTNAME:8000/v1
-openstack endpoint create --region RegionOne cloudformation admin https://$HEAT_HOSTNAME:8000/v1
+openstack endpoint create --region RegionOne cloudformation public http://$HEAT_HOSTNAME:8000/v1
+openstack endpoint create --region RegionOne cloudformation internal http://$HEAT_HOSTNAME:8000/v1
+openstack endpoint create --region RegionOne cloudformation admin http://$HEAT_HOSTNAME:8000/v1
 
 echo "Создание домена heat"
 
@@ -2383,45 +2060,11 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install python3-heatclient
 }
 
 
+
+
 function heat_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Heat\033[0m"
-
-echo "Создание собственного SSL/TLS сертификата для сервиса Heat"
-
-if ! [ -f /etc/pki/tls/certs/server.key ] ; then
-
-echo "Редактирование конфига /etc/ssl/openssl.cnf"
-
-{
-echo "[$DNS]"
-echo "subjectAltName = DNS:$HOSTNAME"
-} >> /etc/ssl/openssl.cnf
-
-echo "Создание RSA ключа /etc/pki/tls/certs/server.key"
-
-cd /etc/pki/tls/certs
-openssl genrsa -aes128 -passout pass:openstack 2048 > server.key
-
-echo "Удаление контрольной фразы из ключа server.key"
-
-openssl rsa -in server.key -out server.key --passin pass:openstack
-
-echo "Создание CSR токена /etc/pki/tls/certs/server.csr"
-
-openssl req -utf8 -new -key server.key -out server.csr -subj "/C=RU/ST=SPB/L=SPB/O=ITMO/CN=$HOSTNAME"
-
-echo "Создание SSL сертификата /etc/pki/tls/certs/server.crt"
-
-openssl x509 -in server.csr -out server.crt -req -signkey server.key -extfile /etc/ssl/openssl.cnf -extensions $DNS -days 3650
-chmod 600 server.key
-
-fi
-
-echo "Копирование ключей в папку /etc/heat"
-
-cp /etc/pki/tls/certs/{server.crt,server.key} /etc/heat/
-chown heat /etc/heat/{server.crt,server.key}
 
 echo "Установка служб необходимых для работы сервиса Heat"
 
@@ -2431,26 +2074,17 @@ echo "Редактирование конфига /etc/heat/heat.conf"
 
 crudini --set /etc/heat/heat.conf DEFAULT deferred_auth_method trusts
 crudini --set /etc/heat/heat.conf DEFAULT trusts_delegated_roles heat_stack_owner
-crudini --set /etc/heat/heat.conf DEFAULT heat_metadata_server_url https://$HEAT_HOSTNAME:8000
-crudini --set /etc/heat/heat.conf DEFAULT heat_waitcondition_server_url https://$HEAT_HOSTNAME:8000/v1/waitcondition
+crudini --set /etc/heat/heat.conf DEFAULT heat_metadata_server_url http://$HEAT_HOSTNAME:8000
+crudini --set /etc/heat/heat.conf DEFAULT heat_waitcondition_server_url http://$HEAT_HOSTNAME:8000/v1/waitcondition
 crudini --set /etc/heat/heat.conf DEFAULT heat_stack_user_role heat_stack_user
 crudini --set /etc/heat/heat.conf DEFAULT stack_user_domain_name heat
 crudini --set /etc/heat/heat.conf DEFAULT stack_domain_admin heat_domain_admin
 crudini --set /etc/heat/heat.conf DEFAULT stack_domain_admin_password $HEAT_PASS
 crudini --set /etc/heat/heat.conf DEFAULT transport_url rabbit://heat:$HEAT_PASS@$NOVA_HOSTNAME
 crudini --set /etc/heat/heat.conf database connection mysql+pymysql://heat:$HEAT_PASS@$NOVA_HOSTNAME/heat
-crudini --set /etc/heat/heat.conf clients_keystone auth_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/heat/heat.conf clients_keystone insecure true
-crudini --set /etc/heat/heat.conf heat_api bind_host $HOST_IP
-crudini --set /etc/heat/heat.conf heat_api bind_port 8004
-crudini --set /etc/heat/heat.conf heat_api cert_file /etc/heat/server.crt
-crudini --set /etc/heat/heat.conf heat_api key_file /etc/heat/server.key
-crudini --set /etc/heat/heat.conf heat_api_cfn bind_host $HOST_IP
-crudini --set /etc/heat/heat.conf heat_api_cfn bind_port 8000
-crudini --set /etc/heat/heat.conf heat_api_cfn cert_file /etc/heat/server.crt
-crudini --set /etc/heat/heat.conf heat_api_cfn key_file /etc/heat/server.key
-crudini --set /etc/heat/heat.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/heat/heat.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/heat/heat.conf clients_keystone auth_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/heat/heat.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/heat/heat.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/heat/heat.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/heat/heat.conf keystone_authtoken auth_type password
 crudini --set /etc/heat/heat.conf keystone_authtoken project_domain_name default
@@ -2458,8 +2092,7 @@ crudini --set /etc/heat/heat.conf keystone_authtoken user_domain_name default
 crudini --set /etc/heat/heat.conf keystone_authtoken project_name service
 crudini --set /etc/heat/heat.conf keystone_authtoken username heat
 crudini --set /etc/heat/heat.conf keystone_authtoken password $HEAT_PASS
-crudini --set /etc/heat/heat.conf keystone_authtoken insecure true
-crudini --set /etc/heat/heat.conf trustee auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/heat/heat.conf trustee auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/heat/heat.conf trustee auth_type password
 crudini --set /etc/heat/heat.conf trustee user_domain_name default
 crudini --set /etc/heat/heat.conf trustee username heat
@@ -2482,6 +2115,7 @@ systemctl enable --now openstack-heat-engine
 }
 
 
+
 function barbican_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Barbican\033[0m"
@@ -2501,9 +2135,9 @@ openstack service create --name barbican --description "Key Manager" key-manager
 
 echo "Создание точек входа в сервис barbican"
 
-openstack endpoint create --region RegionOne key-manager public https://$NOVA_HOSTNAME:9311
-openstack endpoint create --region RegionOne key-manager internal https://$NOVA_HOSTNAME:9311
-openstack endpoint create --region RegionOne key-manager admin https://$NOVA_HOSTNAME:9311
+openstack endpoint create --region RegionOne key-manager public http://$NOVA_HOSTNAME:9311
+openstack endpoint create --region RegionOne key-manager internal http://$NOVA_HOSTNAME:9311
+openstack endpoint create --region RegionOne key-manager admin http://$NOVA_HOSTNAME:9311
 
 echo "Создание БД для сервиса barbican"
 
@@ -2529,7 +2163,7 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-barbican
 
 echo "Редактирование конфига /etc/barbican/barbican.conf"
 
-crudini --set /etc/barbican/barbican.conf DEFAULT host_href https://$NOVA_HOSTNAME:9311
+crudini --set /etc/barbican/barbican.conf DEFAULT host_href http://$NOVA_HOSTNAME:9311
 crudini --set /etc/barbican/barbican.conf DEFAULT log_file /var/log/barbican/api.log
 crudini --set /etc/barbican/barbican.conf DEFAULT sql_connection mysql+pymysql://barbican:$BARBICAN_PASS@$NOVA_HOSTNAME/barbican
 crudini --set /etc/barbican/barbican.conf DEFAULT transport_url rabbit://barbican:$BARBICAN_PASS@$NOVA_HOSTNAME
@@ -2539,9 +2173,9 @@ crudini --set /etc/barbican/barbican.conf secretstore namespace barbican.secrets
 crudini --set /etc/barbican/barbican.conf secretstore enabled_secretstore_plugins store_crypto
 crudini --set /etc/barbican/barbican.conf crypto namespace barbican.crypto.plugin
 crudini --set /etc/barbican/barbican.conf crypto enabled_crypto_plugins simple_crypto
-crudini --set /etc/barbican/barbican.conf simple_crypto_plugin kek "'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY='"
-crudini --set /etc/barbican/barbican.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/barbican/barbican.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/barbican/barbican.conf simple_crypto_plugin kek 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY='
+crudini --set /etc/barbican/barbican.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/barbican/barbican.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/barbican/barbican.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/barbican/barbican.conf keystone_authtoken auth_type password
 crudini --set /etc/barbican/barbican.conf keystone_authtoken project_domain_name default
@@ -2549,22 +2183,6 @@ crudini --set /etc/barbican/barbican.conf keystone_authtoken user_domain_name de
 crudini --set /etc/barbican/barbican.conf keystone_authtoken project_name service
 crudini --set /etc/barbican/barbican.conf keystone_authtoken username barbican
 crudini --set /etc/barbican/barbican.conf keystone_authtoken password $BARBICAN_PASS
-crudini --set /etc/barbican/barbican.conf keystone_authtoken insecure true
-
-echo "Редактирование конфига /etc/barbican/gunicorn-config.py"
-
-sed -c -i 's/0.0.0.0:9311/127.0.0.1:9311/' /etc/barbican/gunicorn-config.py
-
-echo "Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream barbican-api {\
-        server 127.0.0.1:9311;\
-    }\
-    server {\
-        listen '$NOVA_IP':9311 ssl;\
-        proxy_pass barbican-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Инициализация БД barbican"
 
@@ -2579,14 +2197,11 @@ echo "Добавление Barbican в исключения firewall"
 firewall-cmd --add-port=9311/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск nginx"
-
-systemctl restart nginx
-
 echo "Запуск openstack-barbican-api"
 
 systemctl enable --now openstack-barbican-api
 }
+
 
 
 function manila_controller_config() {
@@ -2602,15 +2217,15 @@ echo "Присваивание пользователю manila роли admin в
 
 openstack role add --project service --user manila admin
 
-echo "Создание сервиса manilav2"
+echo "Создание сервиса manila"
 
-openstack service create --name manilav2 --description "Shared Filesystem V2" sharev2
+openstack service create --name manila --description "Shared Filesystem V2" sharev2
 
 echo "Создание точек входа в сервис manila"
 
-openstack endpoint create --region RegionOne sharev2 public https://$NOVA_HOSTNAME:8786/v2
-openstack endpoint create --region RegionOne sharev2 internal https://$NOVA_HOSTNAME:8786/v2
-openstack endpoint create --region RegionOne sharev2 admin https://$NOVA_HOSTNAME:8786/v2
+openstack endpoint create --region RegionOne sharev2 public http://$NOVA_HOSTNAME:8786/v2
+openstack endpoint create --region RegionOne sharev2 internal http://$NOVA_HOSTNAME:8786/v2
+openstack endpoint create --region RegionOne sharev2 admin http://$NOVA_HOSTNAME:8786/v2
 
 echo "Создание БД для сервиса Manila"
 
@@ -2636,8 +2251,6 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-manila pytho
 
 echo "Редактирование конфига /etc/manila/manila.conf"
 
-crudini --set /etc/manila/manila.conf DEFAULT osapi_share_listen 127.0.0.1
-crudini --set /etc/manila/manila.conf DEFAULT osapi_share_listen_port 8786
 crudini --set /etc/manila/manila.conf DEFAULT rootwrap_config /etc/manila/rootwrap.conf
 crudini --set /etc/manila/manila.conf DEFAULT api_paste_config /etc/manila/api-paste.ini
 crudini --set /etc/manila/manila.conf DEFAULT auth_strategy keystone
@@ -2646,8 +2259,8 @@ crudini --set /etc/manila/manila.conf DEFAULT share_name_template share-%s
 crudini --set /etc/manila/manila.conf DEFAULT state_path /var/lib/manila
 crudini --set /etc/manila/manila.conf DEFAULT transport_url rabbit://manila:$MANILA_PASS@$NOVA_HOSTNAME
 crudini --set /etc/manila/manila.conf database connection mysql+pymysql://manila:$MANILA_PASS@$NOVA_HOSTNAME/manila
-crudini --set /etc/manila/manila.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/manila/manila.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/manila/manila.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/manila/manila.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/manila/manila.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/manila/manila.conf keystone_authtoken auth_type password
 crudini --set /etc/manila/manila.conf keystone_authtoken project_domain_name default
@@ -2655,7 +2268,6 @@ crudini --set /etc/manila/manila.conf keystone_authtoken user_domain_name defaul
 crudini --set /etc/manila/manila.conf keystone_authtoken project_name service
 crudini --set /etc/manila/manila.conf keystone_authtoken username manila
 crudini --set /etc/manila/manila.conf keystone_authtoken password $MANILA_PASS
-crudini --set /etc/manila/manila.conf keystone_authtoken insecure true
 crudini --set /etc/manila/manila.conf oslo_concurrency lock_path /var/lib/manila/tmp
 crudini --set /etc/manila/manila.conf oslo_policy policy_file /etc/manila/policy.yaml
 
@@ -2663,17 +2275,6 @@ echo "Выдача прав на файл /etc/manila/policy.yaml сервису
 
 chmod 640 /etc/manila/policy.yaml
 chgrp manila /etc/manila/policy.yaml
-
-echo " Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream manila-api {\
-        server 127.0.0.1:8786;\
-    }\
-    server {\
-        listen '$NOVA_IP':8786 ssl;\
-        proxy_pass manila-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Инициализация БД manila"
 
@@ -2688,15 +2289,13 @@ echo "Добавление Manila в исключения firewall"
 firewall-cmd --add-port=8786/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск nginx"
-
-systemctl restart nginx
-
 echo "Запуск openstack-manila-api и openstack-manila-scheduler"
 
 systemctl enable --now openstack-manila-api
 systemctl enable --now openstack-manila-scheduler
 }
+
+
 
 
 function manila_storage_config() {
@@ -2705,7 +2304,7 @@ echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Manila\033[0m"
 
 echo "Установка служб необходимых для работы Manila"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-manila-share python3-manilaclient python3-PyMySQL python3-mysqlclient nfs-utils nfs4-acl-tools targetcli
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-manila-share python3-manilaclient python3-PyMySQL python3-mysqlclient dnf nfs-utils nfs4-acl-tools targetcli
 
 echo "Редактирование конфига /etc/manila/manila.conf"
 
@@ -2714,13 +2313,13 @@ crudini --set /etc/manila/manila.conf DEFAULT rootwrap_config /etc/manila/rootwr
 crudini --set /etc/manila/manila.conf DEFAULT api_paste_config /etc/manila/api-paste.ini
 crudini --set /etc/manila/manila.conf DEFAULT auth_strategy keystone
 crudini --set /etc/manila/manila.conf DEFAULT default_share_type default_share_type
+crudini --set /etc/manila/manila.conf DEFAULT enabled_share_protocols NFS
 crudini --set /etc/manila/manila.conf DEFAULT transport_url rabbit://manila:$MANILA_PASS@$NOVA_HOSTNAME
 crudini --set /etc/manila/manila.conf DEFAULT enabled_share_backends lvm
-crudini --set /etc/manila/manila.conf DEFAULT enabled_share_protocols NFS
 crudini --set /etc/manila/manila.conf DEFAULT state_path /var/lib/manila
 crudini --set /etc/manila/manila.conf database connection mysql+pymysql://manila:$MANILA_PASS@$NOVA_HOSTNAME/manila
-crudini --set /etc/manila/manila.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/manila/manila.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/manila/manila.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/manila/manila.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/manila/manila.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/manila/manila.conf keystone_authtoken auth_type password
 crudini --set /etc/manila/manila.conf keystone_authtoken project_domain_name default
@@ -2728,7 +2327,6 @@ crudini --set /etc/manila/manila.conf keystone_authtoken user_domain_name defaul
 crudini --set /etc/manila/manila.conf keystone_authtoken project_name service
 crudini --set /etc/manila/manila.conf keystone_authtoken username manila
 crudini --set /etc/manila/manila.conf keystone_authtoken password $MANILA_PASS
-crudini --set /etc/manila/manila.conf keystone_authtoken insecure true
 crudini --set /etc/manila/manila.conf oslo_concurrency lock_path /var/lib/manila/tmp
 crudini --set /etc/manila/manila.conf lvm share_backend_name LVM
 crudini --set /etc/manila/manila.conf lvm share_driver manila.share.drivers.lvm.LVMShareDriver
@@ -2736,9 +2334,9 @@ crudini --set /etc/manila/manila.conf lvm driver_handles_share_servers false
 crudini --set /etc/manila/manila.conf lvm lvm_share_volume_group manila-volumes
 crudini --set /etc/manila/manila.conf lvm lvm_share_export_ips $HOST_IP
 
-echo "Конфигурация запуска openstack-manila-share"
+echo "Настройка запуска сервиса Manila"
 
-SYSTEMD_EDITOR=tee systemctl edit openstack-manila-share << EOF
+SYSTEMD_EDITOR=tee systemctl edit sddm <<EOF
 [Service]
 ExecStart=
 ExecStart=/usr/bin/manila-share --config-file /etc/manila/manila.conf --logfile /var/log/manila/share.log
@@ -2751,6 +2349,7 @@ echo "Смена языка системы на английский, так к�
 localectl set-locale LANG=C.UTF-8
 
 echo "Добавление Manila в исключения firewall"
+
 firewall-cmd --add-service=nfs
 firewall-cmd --runtime-to-permanent
 
@@ -2785,9 +2384,9 @@ openstack service create --name designate --description "DNS Service" dns
 
 echo "Создание точек входа в сервис designate"
 
-openstack endpoint create --region RegionOne dns public https://$DESIGNATE_HOSTNAME:9001
-openstack endpoint create --region RegionOne dns internal https://$DESIGNATE_HOSTNAME:9001
-openstack endpoint create --region RegionOne dns admin https://$DESIGNATE_HOSTNAME:9001
+openstack endpoint create --region RegionOne dns public http://$DESIGNATE_HOSTNAME:9001
+openstack endpoint create --region RegionOne dns internal http://$DESIGNATE_HOSTNAME:9001
+openstack endpoint create --region RegionOne dns admin http://$DESIGNATE_HOSTNAME:9001
 
 echo "Создание БД для сервиса Designate"
 
@@ -2813,13 +2412,15 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install python3-designateclien
 }
 
 
+
+
 function desigante_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Designate\033[0m"
 
 echo "Установка служб необходимых для работы сервиса Designate"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-designate-api openstack-designate-central openstack-designate-worker openstack-designate-producer openstack-designate-mdns python3-designateclient bind bind-utils nginx nginx-mod-stream 
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-designate-api openstack-designate-central openstack-designate-worker openstack-designate-producer openstack-designate-mdns python3-designateclient bind bind-utils
 
 echo "Создание rndc-ключа для сервиса Designate"
 
@@ -2874,13 +2475,12 @@ crudini --set /etc/designate/designate.conf DEFAULT transport_url rabbit://desig
 crudini --set /etc/designate/designate.conf DEFAULT log_dir /var/log/designate
 crudini --set /etc/designate/designate.conf DEFAULT root_helper "sudo designate-rootwrap /etc/designate/rootwrap.conf"
 crudini --set /etc/designate/designate.conf database connection mysql+pymysql://designate:$DESIGNATE_PASS@$NOVA_HOSTNAME/designate
-crudini --set /etc/designate/designate.conf service:api listen 127.0.0.1:9001
 crudini --set /etc/designate/designate.conf service:api auth_strategy keystone
-crudini --set /etc/designate/designate.conf service:api api_base_uri https://$DESIGNATE_HOSTNAME:9001
+crudini --set /etc/designate/designate.conf service:api api_base_uri http://$DESIGNATE_HOSTNAME:9001
 crudini --set /etc/designate/designate.conf service:api enable_api_v2 true
 crudini --set /etc/designate/designate.conf service:api enabled_extensions_v2 "quotas, reports"
-crudini --set /etc/designate/designate.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/designate/designate.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/designate/designate.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/designate/designate.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/designate/designate.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/designate/designate.conf keystone_authtoken auth_type password
 crudini --set /etc/designate/designate.conf keystone_authtoken project_domain_name default
@@ -2888,7 +2488,6 @@ crudini --set /etc/designate/designate.conf keystone_authtoken user_domain_name 
 crudini --set /etc/designate/designate.conf keystone_authtoken project_name service
 crudini --set /etc/designate/designate.conf keystone_authtoken username designate
 crudini --set /etc/designate/designate.conf keystone_authtoken password $DESIGNATE_PASS
-crudini --set /etc/designate/designate.conf keystone_authtoken insecure true
 crudini --set /etc/designate/designate.conf service:worker enabled true
 crudini --set /etc/designate/designate.conf service:worker notify true
 crudini --set /etc/designate/designate.conf storage:sqlalchemy connection mysql+pymysql://designate:$DESIGNATE_PASS@$NOVA_HOSTNAME/designate
@@ -2934,23 +2533,6 @@ echo "Обновление пула в БД designate"
 
 su -s /bin/bash -c "designate-manage pool update" designate
 
-if [ "$(cat /etc/nginx/nginx.conf | grep "#")" != "" ]
-
-nginx_init_config
-
-fi
-
-echo " Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream designate-api {\
-        server 127.0.0.1:9001;\
-    }\
-    server {\
-        listen '$HOST_IP':9001 ssl;\
-        proxy_pass designate-api;\
-    }' /etc/nginx/nginx.conf
-
 echo "Изменение политик SELinux касательно Designate"
 
 setsebool -P named_write_master_zones on
@@ -2961,16 +2543,14 @@ firewall-cmd --add-service=dns
 firewall-cmd --add-port={5354/tcp,5354/udp,9001/tcp}
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск nginx"
-
-systemctl restart nginx
-
 echo "Запуск designate-worker, designate-producer и designate-mdns"
 
 systemctl enable --now designate-worker 
 systemctl enable --now designate-producer
 systemctl enable --now designate-mdns
 }
+
+
 
 
 function octavia_controller_config() {
@@ -2992,9 +2572,9 @@ openstack service create --name octavia --description "LBaaS" load-balancer
 
 echo "Создание точек входа в сервис octavia"
 
-openstack endpoint create --region RegionOne load-balancer public https://$OCTAVIA_HOSTNAME:9876
-openstack endpoint create --region RegionOne load-balancer internal https://$OCTAVIA_HOSTNAME:9876
-openstack endpoint create --region RegionOne load-balancer admin https://$OCTAVIA_HOSTNAME:9876
+openstack endpoint create --region RegionOne load-balancer public http://$OCTAVIA_HOSTNAME:9876
+openstack endpoint create --region RegionOne load-balancer internal http://$OCTAVIA_HOSTNAME:9876
+openstack endpoint create --region RegionOne load-balancer admin http://$OCTAVIA_HOSTNAME:9876
 
 echo "Создание БД для сервиса octavia"
 
@@ -3044,65 +2624,34 @@ openstack security group rule create --protocol tcp --dst-port 9443:9443 lb-mgmt
 }
 
 
+
 function octavia_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Octavia\033[0m"
 
 echo "Установка служб необходимых для работы сервиса Octavia"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-octavia-api openstack-octavia-health-manager openstack-octavia-housekeeping openstack-octavia-worker nginx nginx-mod-stream 
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-octavia-api openstack-octavia-health-manager openstack-octavia-housekeeping openstack-octavia-worker
 
-echo "Создание сертификатов для балансировщиков нагрузки"
-
-mkdir -p /etc/octavia/certs/private
-mkdir ~/work
-cd ~/work
-git clone https://opendev.org/openstack/octavia.git
-cd octavia/bin
-./create_dual_intermediate_CA.sh
-cp -p ./dual_ca/etc/octavia/certs/server_ca.cert.pem /etc/octavia/certs
-cp -p ./dual_ca/etc/octavia/certs/server_ca-chain.cert.pem /etc/octavia/certs
-cp -p ./dual_ca/etc/octavia/certs/server_ca.key.pem /etc/octavia/certs/private
-cp -p ./dual_ca/etc/octavia/certs/client_ca.cert.pem /etc/octavia/certs
-cp -p ./dual_ca/etc/octavia/certs/client.cert-and-key.pem /etc/octavia/certs/private
-chown -R octavia /etc/octavia/certs
-cd ~/
-
-#echo "Получение информации об id компонентов кластера"
-
-#flavor_id="100"
-#sg_id=
-#net_id=
-
-echo "Редактирование конфига  /etc/octavia/octavia.conf"
+echo "Редактирование конфига /etc/octavia/octavia.conf"
 
 crudini --set /etc/octavia/octavia.conf DEFAULT transport_url rabbit://octavia:$OCTAVIA_PASS@$NOVA_HOSTNAME
-crudini --set /etc/octavia/octavia.conf api_settings bind_host 127.0.0.1
-crudini --set /etc/octavia/octavia.conf api_settings bind_port 9876
+crudini --set /etc/octavia/octavia.conf api_settings bind_host 0.0.0.0
 crudini --set /etc/octavia/octavia.conf api_settings auth_strategy keystone
-crudini --set /etc/octavia/octavia.conf api_settings api_base_uri https://$OCTAVIA_HOSTNAME:9876
+crudini --set /etc/octavia/octavia.conf api_settings api_base_uri http://$OCTAVIA_HOSTNAME:9876
 crudini --set /etc/octavia/octavia.conf health_manager bind_ip $HOST_IP
-crudini --set /etc/octavia/octavia.conf health_manager bind_port 5555
 crudini --set /etc/octavia/octavia.conf database connection mysql+pymysql://octavia:$OCTAVIA_PASS@$NOVA_HOSTNAME/octavia
-crudini --set /etc/octavia/octavia.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/octavia/octavia.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/octavia/octavia.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/octavia/octavia.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/octavia/octavia.conf service_auth memcached_servers $NOVA_HOSTNAME::11211
 crudini --set /etc/octavia/octavia.conf keystone_authtoken auth_type password
 crudini --set /etc/octavia/octavia.conf keystone_authtoken project_domain_name default
 crudini --set /etc/octavia/octavia.conf keystone_authtoken user_domain_name default
 crudini --set /etc/octavia/octavia.conf keystone_authtoken project_name service
 crudini --set /etc/octavia/octavia.conf keystone_authtoken username octavia
 crudini --set /etc/octavia/octavia.conf keystone_authtoken password $OCTAVIA_PASS
-crudini --set /etc/octavia/octavia.conf keystone_authtoken insecure true
-crudini --set /etc/octavia/octavia.conf neutron insecure true
-crudini --set /etc/octavia/octavia.conf certificates ca_private_key /etc/octavia/certs/private/server_ca.key.pem
-crudini --set /etc/octavia/octavia.conf certificates ca_certificate /etc/octavia/certs/server_ca.cert.pem
-crudini --set /etc/octavia/octavia.conf certificates server_certs_key_passphrase insecure-key-do-not-use-this-key
-crudini --set /etc/octavia/octavia.conf certificates ca_private_key_passphrase not-secure-passphrase
-crudini --set /etc/octavia/octavia.conf haproxy_amphora server_ca /etc/octavia/certs/server_ca-chain.cert.pem
-crudini --set /etc/octavia/octavia.conf haproxy_amphora client_cert /etc/octavia/certs/private/client.cert-and-key.pem
-crudini --set /etc/octavia/octavia.conf controller_worker client_ca /etc/octavia/certs/client_ca.cert.pem
 crudini --set /etc/octavia/octavia.conf oslo_messaging topic octavia_prov
-crudini --set /etc/octavia/octavia.conf service_auth auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/octavia/octavia.conf service_auth auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/octavia/octavia.conf service_auth memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/octavia/octavia.conf service_auth auth_type password
 crudini --set /etc/octavia/octavia.conf service_auth project_domain_name default
@@ -3110,35 +2659,10 @@ crudini --set /etc/octavia/octavia.conf service_auth user_domain_name default
 crudini --set /etc/octavia/octavia.conf service_auth project_name service
 crudini --set /etc/octavia/octavia.conf service_auth username octavia
 crudini --set /etc/octavia/octavia.conf service_auth password $OCTAVIA_PASS
-crudini --set /etc/octavia/octavia.conf service_auth insecure true
-#crudini --set /etc/octavia/octavia.conf controller_worker amp_image_tag Amphora
-#crudini --set /etc/octavia/octavia.conf controller_worker amp_flavor_id $flavor_id
-#crudini --set /etc/octavia/octavia.conf controller_worker amp_secgroup_list $sg_id
-#crudini --set /etc/octavia/octavia.conf controller_worker amp_boot_network_list $net_id
-#crudini --set /etc/octavia/octavia.conf controller_worker network_driver allowed_address_pairs_driver
-#crudini --set /etc/octavia/octavia.conf controller_worker amphora_driver amphora_haproxy_rest_driver 
-#crudini --set /etc/octavia/octavia.conf controller_worker compute_driver compute_nova_driver
 
 echo "Инициализация БД octavia"
 
 su -s /bin/bash octavia -c "octavia-db-manage --config-file /etc/octavia/octavia.conf upgrade head"
-
-if [ "$(cat /etc/nginx/nginx.conf | grep "#")" != "" ]
-
-nginx_init_config
-
-fi
-
-echo " Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream octavia-api {\
-        server 127.0.0.1:9876;\
-    }\
-    server {\
-        listen '$HOST_IP':9876 ssl;\
-        proxy_pass octavia-api;\
-    }' /etc/nginx/nginx.conf
 
 echo "Изменение политик SELinux касательно Octavia"
 
@@ -3149,10 +2673,6 @@ echo "Добавление Octavia в исключения firewall"
 firewall-cmd --add-port=9876/tcp
 firewall-cmd --runtime-to-permanent
 
-echo "Перезапуск nginx"
-
-systemctl restart nginx
-
 echo "Запуск octavia-api, octavia-health-manager, octavia-housekeeping и octavia-worker"
 
 systemctl enable --now octavia-api
@@ -3162,8 +2682,9 @@ systemctl enable --now octavia-worker
 }
 
 
+
 function magnum_controller_config() {
-	
+
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Magnum\033[0m"
 
 echo "Создание пользователя magnum"
@@ -3181,9 +2702,9 @@ openstack service create --name magnum --description "Containers Orchestration" 
 
 echo "Создание точек входа в сервисы magnum"
 
-openstack endpoint create --region RegionOne container-infra public https://$MAGNUM_HOSTNAME:9511/v1
-openstack endpoint create --region RegionOne container-infra internal https://$MAGNUM_HOSTNAME:9511/v1
-openstack endpoint create --region RegionOne container-infra admin https://$MAGNUM_HOSTNAME:9511/v1
+openstack endpoint create --region RegionOne container-infra public http://$MAGNUM_HOSTNAME:9511/v1
+openstack endpoint create --region RegionOne container-infra internal http://$MAGNUM_HOSTNAME:9511/v1
+openstack endpoint create --region RegionOne container-infra admin http://$MAGNUM_HOSTNAME:9511/v1
 
 echo "Создание домена magnum"
 
@@ -3192,7 +2713,7 @@ openstack domain create --description "Containers projects and users" magnum
 echo "Создание пользователя magnum_domain_admin в домене magnum"
 
 openstack user create --domain magnum --password $MAGNUM_PASS magnum_domain_admin
-	
+
 echo "Присваивание пользователю magnum_domain_admin роли admin в домене magnum"
 
 openstack role add --domain magnum --user-domain magnum --user magnum_domain_admin admin 
@@ -3225,33 +2746,29 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install python3-magnumclient
 }
 
 
+
 function magnum_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Magnum\033[0m"
 
 echo "Установка служб необходимых для работы сервиса Magnum"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-magnum-api openstack-magnum-conductor python3-magnumclient nginx nginx-mod-stream 
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-magnum-api openstack-magnum-conductor python3-magnumclient
 
 echo "Редактирование конфига /etc/magnum/magnum.conf"
 
 crudini --set /etc/magnum/magnum.conf DEFAULT transport_url rabbit://magnum:$MAGNUM_PASS@$NOVA_HOSTNAME
 crudini --set /etc/magnum/magnum.conf DEFAULT log_dir /var/log/magnum
-crudini --set /etc/magnum/magnum.conf api host 127.0.0.1
-crudini --set /etc/magnum/magnum.conf api port 9511
+crudini --set /etc/magnum/magnum.conf api host 0.0.0.0
 crudini --set /etc/magnum/magnum.conf api enabled_ssl false
 crudini --set /etc/magnum/magnum.conf database connection mysql+pymysql://magnum:$MAGNUM_PASS@$NOVA_HOSTNAME/magnum
 crudini --set /etc/magnum/magnum.conf certificates cert_manager_type barbican
 crudini --set /etc/magnum/magnum.conf cinder default_docker_volume_type lvm-magnum
 crudini --set /etc/magnum/magnum.conf cinder_client region_name RegionOne
 crudini --set /etc/magnum/magnum.conf magnum_client region_name RegionOne
-crudini --set /etc/magnum/magnum.conf neutron_client insecure true
-crudini --set /etc/magnum/magnum.conf nova_client insecure true
-crudini --set /etc/magnum/magnum.conf heat_client insecure true
-crudini --set /etc/magnum/magnum.conf glance_client insecure true
-crudini --set /etc/magnum/magnum.conf cinder_client insecure true
-crudini --set /etc/magnum/magnum.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/magnum/magnum.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+
+crudini --set /etc/magnum/magnum.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/magnum/magnum.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/magnum/magnum.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/magnum/magnum.conf keystone_authtoken auth_type password
 crudini --set /etc/magnum/magnum.conf keystone_authtoken auth_version v3
@@ -3263,7 +2780,7 @@ crudini --set /etc/magnum/magnum.conf keystone_authtoken password $MAGNUM_PASS
 crudini --set /etc/magnum/magnum.conf keystone_authtoken admin_user magnum
 crudini --set /etc/magnum/magnum.conf keystone_authtoken admin_password $MAGNUM_PASS
 crudini --set /etc/magnum/magnum.conf keystone_authtoken admin_tenant_name service
-crudini --set /etc/magnum/magnum.conf keystone_authtoken insecure true
+
 crudini --set /etc/magnum/magnum.conf oslo_policy enforce_scope false
 crudini --set /etc/magnum/magnum.conf oslo_policy enforce_new_defaults false
 crudini --set /etc/magnum/magnum.conf oslo_policy policy_file /etc/magnum/policy.json
@@ -3348,8 +2865,8 @@ cat << EOF > /etc/magnum/policy.json
     "nodegroup:update": "rule:admin_or_owner"
 }
 EOF
-chmod 640 /etc/magnum/policy.json
-chgrp magnum /etc/magnum/policy.json
+chmod 640 /etc/magnum/{magnum.conf,policy.json}
+chgrp magnum /etc/magnum/{magnum.conf,policy.json}
 mkdir /var/lib/magnum/tmp
 chown magnum /var/lib/magnum/tmp
 
@@ -3357,37 +2874,17 @@ echo "Инициализация БД magnum"
 
 su -s /bin/bash magnum -c "magnum-db-manage upgrade"
 
-if [ "$(cat /etc/nginx/nginx.conf | grep "#")" != "" ]
-
-nginx_init_config
-
-fi
-
-echo " Редактирование конфига /etc/nginx/nginx.conf"
-
-sed -i -c '/ssl_certificate /i \
-    upstream magnum-api {\
-        server 127.0.0.1:9511;\
-    }\
-    server {\
-        listen '$HOST_IP':9511 ssl;\
-        proxy_pass magnum-api;\
-    }' /etc/nginx/nginx.conf
-
 echo "Добавление Cinder в исключения firewall"
 
 firewall-cmd --add-port=9511/tcp
 firewall-cmd --runtime-to-permanent
-
-echo "Перезапуск nginx"
-
-systemctl restart nginx
 
 echo "Запуск openstack-magnum-api и openstack-magnum-conductor"
 
 systemctl enable --now openstack-magnum-api
 systemctl enable --now openstack-magnum-conductor
 }
+
 
 
 function rally_config() {
@@ -3417,7 +2914,7 @@ mkdir /var/log/rally
 
 echo "Инициализация БД rally"
 
-rally db create
+ rally db create
 
 echo "Заполнение переменных необходимых для проведения бенчмарков"
 
@@ -3450,6 +2947,7 @@ cat << EOF > boot-and-delete.json
 }
 EOF
 }
+
 
 
 function kitty_controller_config() {
@@ -3503,6 +3001,7 @@ dnf --enablerepo=centos-openstack-zed,epel,crb -y install python3-cloudkittyclie
 }
 
 
+
 function kitty_network_config() {
 
 echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА CloudKitty\033[0m"
@@ -3521,15 +3020,15 @@ crudini --set /etc/cloudkitty/cloudkitty.conf collect metrics_conf /etc/cloudkit
 crudini --set /etc/cloudkitty/cloudkitty.conf collector_gnocchi auth_section keystone_authtoken
 crudini --set /etc/cloudkitty/cloudkitty.conf collector_gnocchi region_name RegionOne
 crudini --set /etc/cloudkitty/cloudkitty.conf database connection mysql+pymysql://cloudkitty:$KITTY_PASS@$NOVA_HOSTNAME/cloudkitty
+crudini --set /etc/cloudkitty/cloudkitty.conf collector_gnocchi region_name RegionOne
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher backend gnocchi
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_gnocchi auth_section keystone_authtoken
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_gnocchi region_name RegionOne
-crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_gnocchi insecure true
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_keystone keystone_version 3
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_keystone auth_section keystone_authtoken
 crudini --set /etc/cloudkitty/cloudkitty.conf fetcher_keystone region_name RegionOne
-crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken www_authenticate_uri https://$NOVA_HOSTNAME:5000
-crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken auth_url https://$NOVA_HOSTNAME:5000
+crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken auth_type password
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken project_domain_name default
@@ -3537,9 +3036,7 @@ crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken user_domain_nam
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken project_name service
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken username cloudkitty
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken password $KITTY_PASS
-crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken service_token_roles_required true
 crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken region_name RegionOne
-crudini --set /etc/cloudkitty/cloudkitty.conf keystone_authtoken insecure true
 crudini --set /etc/cloudkitty/cloudkitty.conf oslo_messaging_notifications driver messagingv2
 crudini --set /etc/cloudkitty/cloudkitty.conf oslo_messaging_notifications transport_url rabbit://cloudkitty:$KITTY_PASS@$NOVA_HOSTNAME
 crudini --set /etc/cloudkitty/cloudkitty.conf storage backend sqlalchemy
@@ -3564,18 +3061,14 @@ Listen 8889
     WSGIScriptAlias / /usr/bin/cloudkitty-api
 </VirtualHost>
 EOF
-unset REQUESTS_CA_BUNDLE
 pip3 install DateTimeRange
-source ~/keystonerc_adm
+chmod 640 /etc/cloudkitty/metrics.yml
+chgrp cloudkitty /etc/cloudkitty/metrics.yml
 
 echo "Инициализация БД cloudkitty"
 
 su -s /bin/bash cloudkitty -c "cloudkitty-dbsync upgrade"
 su -s /bin/bash cloudkitty -c "cloudkitty-storage-init"
-
-echo "Перезапуск httpd"
-
-systemctl restart httpd
 
 echo "Добавление CloudKitty в исключения firewall"
 
@@ -3589,72 +3082,126 @@ systemctl enable --now cloudkitty-processor
 
 
 
+function trove_controller_config() {
 
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Trove\033[0m"
 
-function nginx_init_menu() {
+echo "Создание пользователя trove"
+	
+source ~/keystonerc_adm
+openstack user create --domain default --project service --password $TROVE_PASS trove
 
-echo "Создание собственного SSL/TLS сертификата для Nginx"
+echo "Присваивание пользователю trove роли admin в проекте serivce"
 
-echo "Редактирование конфига /etc/ssl/openssl.cnf"
+openstack role add --project service --user trove admin 
 
-{
-echo "[$DNS]"
-echo "subjectAltName = DNS:$HOSTNAME"
-} >> /etc/ssl/openssl.cnf
+echo "Создание сервиса trove"
 
-echo "Создание RSA ключа /etc/pki/tls/certs/server.key"
+openstack service create --name trove --description "Database Service" database
 
-cd /etc/pki/tls/certs
-openssl genrsa -aes128 -passout pass:openstack 2048 > server.key
+echo "Создание точек входа в сервисы trove"
 
-echo "Удаление контрольной фразы из ключа server.key"
+openstack endpoint create --region RegionOne database public http://$NOVA_HOSTNAME:8779/v1.0/%\(tenant_id\)s
+openstack endpoint create --region RegionOne database internal http://$NOVA_HOSTNAME:8779/v1.0/%\(tenant_id\)s
+openstack endpoint create --region RegionOne database admin http://$NOVA_HOSTNAME:8779/v1.0/%\(tenant_id\)s
 
-openssl rsa -in server.key -out server.key --passin pass:openstack
+echo "Создание типа постоянного тома lvm-trove"
 
-echo "Создание CSR токена /etc/pki/tls/certs/server.csr"
+openstack volume type create lvm-trove --private 
 
-openssl req -utf8 -new -key server.key -out server.csr -subj "/C=RU/ST=SPB/L=SPB/O=ITMO/CN=$HOSTNAME"
+echo "Создание БД для сервиса Trove"
 
-echo "Создание SSL сертификата /etc/pki/tls/certs/server.crt"
+mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE trove;"
 
-openssl x509 -in server.csr -out server.crt -req -signkey server.key -extfile /etc/ssl/openssl.cnf -extensions $DNS -days 3650
-chmod 600 server.key
-cd ~/
+echo "Выдача прав на работу с БД пользователю trove"
 
-echo "Редактирование конфига /etc/nginx/nginx.conf"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON trove.* TO 'trove'@'localhost' IDENTIFIED BY '$TROVE_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON trove.* TO 'trove'@'%' IDENTIFIED BY '$TROVE_PASS';"
+mysql --user="root" --password="$DB_PASS" --execute="FLUSH PRIVILEGES;"
 
-cat << EOF > /etc/nginx/nginx.conf
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /run/nginx.pid;
-include /usr/share/nginx/modules/*.conf;
-events {
-    worker_connections 1024;
-}
-http {
-    log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '
-                      '\$status \$body_bytes_sent "\$http_referer" '
-                      '"\$http_user_agent" "\$http_x_forwarded_for"';
-    access_log  /var/log/nginx/access.log  main;
-    sendfile            on;
-    tcp_nopush          on;
-    tcp_nodelay         on;
-    keepalive_timeout   65;
-    types_hash_max_size 2048;
-    include             /etc/nginx/mime.types;
-    default_type        application/octet-stream;
-    include /etc/nginx/conf.d/*.conf;
+echo "Создание пользователя RabbitMQ для сервиса Trove"
+
+rabbitmqctl add_user trove $TROVE_PASS
+
+echo "Выдача созданному пользователю RabbitMQ всех разрешений"
+
+rabbitmqctl set_permissions trove ".*" ".*" ".*"
+
+echo "Установка служб необходимых для работы сервиса Trove"
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install python3-troveclient
 }
 
-stream {
-    ssl_certificate "/etc/pki/tls/certs/server.crt";
-    ssl_certificate_key "/etc/pki/tls/certs/server.key";
-}
-EOF
 
-echo "Запуск nginx"
 
-systemctl enable --now nginx
+function trove_network_config() {
 
+echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Trove\033[0m"
+
+echo "Установка служб необходимых для работы сервиса Trove"
+
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-trove-api openstack-trove-conductor openstack-trove-taskmanager python3-troveclient
+
+echo "Редактирование конфига /etc/trove/trove.conf"
+
+crudini --set /etc/trove/trove.conf DEFAULT log_dir /var/log/trove
+crudini --set /etc/trove/trove.conf DEFAULT transport_url rabbit://trove:$TROVE_PASS@$NOVA_HOSTNAME
+crudini --set /etc/trove/trove.conf DEFAULT control_exchange trove
+crudini --set /etc/trove/trove.conf DEFAULT default_datastore mysql
+crudini --set /etc/trove/trove.conf DEFAULT cinder_volume_type lvm-trove
+crudini --set /etc/trove/trove.conf DEFAULT cloudinit_location /etc/trove/cloudinit
+crudini --set /etc/trove/trove.conf database connection mysql+pymysql://trove:$TROVE_PASS@$NOVA_HOSTNAME/trove
+crudini --set /etc/trove/trove.conf mariadb tcp_ports 3306,4444,4567,4568
+crudini --set /etc/trove/trove.conf mysql tcp_ports 3306
+crudini --set /etc/trove/trove.conf postgresql tcp_ports 5432
+crudini --set /etc/trove/trove.conf redis tcp_ports 6379,16379
+crudini --set /etc/trove/trove.conf keystone_authtoken www_authenticate_uri http://$NOVA_HOSTNAME:5000
+crudini --set /etc/trove/trove.conf keystone_authtoken auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/trove/trove.conf keystone_authtoken memcached_servers $NOVA_HOSTNAME:11211
+crudini --set /etc/trove/trove.conf keystone_authtoken auth_type password
+crudini --set /etc/trove/trove.conf keystone_authtoken project_domain_name default
+crudini --set /etc/trove/trove.conf keystone_authtoken user_domain_name default
+crudini --set /etc/trove/trove.conf keystone_authtoken project_name service
+crudini --set /etc/trove/trove.conf keystone_authtoken username trove
+crudini --set /etc/trove/trove.conf keystone_authtoken password $TROVE_PASS
+crudini --set /etc/trove/trove.conf service_credentials auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/trove/trove.conf service_credentials region_name RegionOne
+crudini --set /etc/trove/trove.conf service_credentials project_domain_name default
+crudini --set /etc/trove/trove.conf service_credentials user_domain_name default
+crudini --set /etc/trove/trove.conf service_credentials project_name service
+crudini --set /etc/trove/trove.conf service_credentials username trove
+crudini --set /etc/trove/trove.conf service_credentials password $TROVE_PASS
+
+echo "Редактирование конфига /etc/trove/trove-guestagent.conf"
+
+crudini --set /etc/trove/trove-guestagent.conf DEFAULT log_dir /var/log/trove
+crudini --set /etc/trove/trove-guestagent.confDEFAULT log_file trove-guestagent.log
+crudini --set /etc/trove/trove-guestagent.confDEFAULT ignore_users os_admin
+crudini --set /etc/trove/trove-guestagent.confDEFAULT control_exchange trove
+crudini --set /etc/trove/trove-guestagent.confDEFAULT transport_url rabbit://trove:$TROVE_PASS@$NOVA_HOSTNAME
+crudini --set /etc/trove/trove-guestagent.confDEFAULT use_syslog false
+crudini --set /etc/trove/trove-guestagent.confservice_credentials auth_url http://$NOVA_HOSTNAME:5000
+crudini --set /etc/trove/trove-guestagent.confservice_credentials region_name RegionOne
+crudini --set /etc/trove/trove-guestagent.confservice_credentials project_domain_name default
+crudini --set /etc/trove/trove-guestagent.confservice_credentials user_domain_name default
+crudini --set /etc/trove/trove-guestagent.confservice_credentials project_name service
+crudini --set /etc/trove/trove-guestagent.confservice_credentials username trove
+crudini --set /etc/trove/trove-guestagent.confservice_credentials password $TROVE_PASS
+chmod 640 /etc/trove/trove-guestagent.conf
+chgrp trove /etc/trove/trove-guestagent.conf
+
+echo "Инициализация БД trove"
+
+su -s /bin/bash trove -c "trove-manage db_sync"
+
+echo "Добавление NFS в исключения firewall"
+
+firewall-cmd --add-port=8779/tcp
+firewall-cmd --runtime-to-permanent
+
+echo "Запуск openstack-trove-api, openstack-trove-taskmanager и openstack-trove-conductor"
+
+systemctl enable --now openstack-trove-api
+systemctl enable --now openstack-trove-taskmanager
+systemctl enable --now openstack-trove-conductor
 }

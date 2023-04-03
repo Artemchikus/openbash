@@ -1860,7 +1860,7 @@ echo -e "\033[1mУСТАНОВКА И НАСТРОЙКА Telemetry\033[0m"
 
 echo "Установка служб необходимых для работы сервиса Gnocchi"
 
-dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-gnocchi-api openstack-gnocchi-metricd python3-gnocchiclient httpd python3-mod_wsgi nginx nginx-mod-stream 
+dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-gnocchi-api openstack-gnocchi-metricd python3-gnocchiclient httpd python3-mod_wsgi
 
 echo "Редактирование конфига /etc/gnocchi/gnocchi.conf"
 

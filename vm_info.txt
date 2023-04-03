@@ -266,6 +266,7 @@ systemctl restart octavia-api octavia-health-manager octavia-housekeeping octavi
 #На управляющем
 openstack loadbalancer create --name lb01 --vip-subnet-id private-subnet --insecure
 openstack loadbalancer list --insecure
+openstack loadbalancer listener create --name listener01 --protocol TCP --protocol-port 80 lb01
 openstack loadbalancer pool create --name pool01 --lb-algorithm ROUND_ROBIN --listener listener01 --protocol TCP --insecure
 openstack server list
 openstack loadbalancer member create --subnet-id private-subnet --address 192.168.100.244 --protocol-port 80 pool01 --insecure

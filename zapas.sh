@@ -1113,7 +1113,7 @@ openstack endpoint create --region RegionOne network admin http://$NOVA_HOSTNAME
 echo "Создание БД для сервиса Neutron"
 
 mysql --user="root" --password="$DB_PASS" --execute="CREATE DATABASE neutron;"
-#
+
 echo "Выдача прав на работу с БД пользователю neutron"
 
 mysql --user="root" --password="$DB_PASS" --execute="GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '$NEUTRON_PASS';"

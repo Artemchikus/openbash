@@ -817,7 +817,7 @@ su -s /bin/bash nova -c "nova-manage cell_v2 create_cell --name cell1"
 
 echo "Выдача прав на папку с логами сервису Placement"
 
-chown placement. /var/log/placement/placement-api.log
+chown placement. /var/log/placement/
 
 echo "Перезапуск Nginx и Httpd"
 

@@ -924,7 +924,7 @@ sed -i -c '/\/VirtualHost/i \
   
 echo "Выдача прав на папку с логами сервису Placement"
 
-chown placement. /var/log/placement/placement-api.log
+chown placement. /var/log/placement/
   
 echo "Инициализация БД placement"
 

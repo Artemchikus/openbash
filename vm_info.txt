@@ -29,7 +29,7 @@ sudo net-autostart default - настройка автозапуска сети 
 sudo wget https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-20230313.0-x86_64-boot.iso - скачивание ISO для ОС виртуалок
 sudo mv CentOS-Stream-9-20230313.0-x86_64-boot.iso /mnt/kvm/iso - перенос ISO в специализированную папку
 
-sudo virt-install --name comp9-ssl --os-type linux --os-variant centos-stream9 --location /mnt/kvm/iso/CentOS-Stream-9-20230307.0-x86_64-boot.iso --graphics none --disk /mnt/kvm/disk/comp9-ssl.qcow2,size=10,format=qcow2 --ram 4096 --network network=default --virt-type kvm --arch x86_64 --console pty,target_type=serial --extra-args 'console=ttyS0,115200n8 serial' - создание ВМ для рабочего узла
+sudo virt-install --name comp9-ssl --os-type linux --os-variant centos-stream9 --location /mnt/kvm/iso/CentOS-Stream-9-20230307.0-x86_64-boot.iso --graphics none --disk /mnt/kvm/disk/comp9-ssl.qcow2,size=10,format=qcow2 --ram 4096 --network network=default --network network=default --virt-type kvm --arch x86_64 --console pty,target_type=serial --extra-args 'console=ttyS0,115200n8 serial' - создание ВМ для рабочего узла
 
 Во время установки выбрать тип установки из консоли (Use test mode) и настроить следующие параметры:
 Time settings (время) - любое, но чтобы на всех ВМ один часовой пояс

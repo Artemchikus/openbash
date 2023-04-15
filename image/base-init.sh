@@ -286,7 +286,7 @@ crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup firewall_drive
 crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_l3_scheduler leastloaded
 crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_metadata_enabled true
 crudini --set /etc/neutron/neutron_ovn_metadata_agent.ini agent root_helper "sudo neutron-rootwrap /etc/neutron/rootwrap.conf"
-sed -c -i 's/OPTIONS=/"/"/OPTIONS=/"--ovsdb-server-options=/'--remote=ptcp:6640:127.0.0.1/'/"/' /etc/sysconfig/openvswitch
+sed -c -i "s/OPTIONS=\"\"/OPTIONS=\"--ovsdb-server-options='--remote=ptcp:6640:127.0.0.1'\"/g" /etc/sysconfig/openvswitch
 ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
 setsebool -P neutron_can_network on
 setsebool -P haproxy_connect_any on 

@@ -1209,7 +1209,7 @@ crudini --set /etc/neutron/plugins/ml2/ml2_conf.ini ovn ovn_metadata_enabled tru
 
 echo "Редактирование конфига /etc/sysconfig/openvswitch"
 
-sed -c -i 's/OPTIONS=/"/"/OPTIONS=/"--ovsdb-server-options=/'--remote=ptcp:6640:127.0.0.1/'/"/' /etc/sysconfig/openvswitch
+sed -c -i "s/OPTIONS=\"\"/OPTIONS=\"--ovsdb-server-options='--remote=ptcp:6640:127.0.0.1'\"/g" /etc/sysconfig/openvswitch
 
 echo "Создание символической ссылки /etc/neutron/plugin.ini на файл /etc/neutron/plugins/ml2/ml2_conf.ini"
 

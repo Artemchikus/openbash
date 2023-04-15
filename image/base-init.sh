@@ -413,7 +413,7 @@ allow neutron_t rpcbind_exec_t:file getattr;
 allow neutron_t rpmdb_exec_t:file getattr;
 allow neutron_t rsync_exec_t:file getattr;
 allow neutron_t ssh_agent_exec_t:file getattr;
-allow neutron_t ssh_exec_t:file getatftr;
+allow neutron_t ssh_exec_t:file getattr;
 allow neutron_t ssh_keygen_exec_t:file getattr;
 allow neutron_t su_exec_t:file getattr;
 allow neutron_t swtpm_exec_t:file getattr;

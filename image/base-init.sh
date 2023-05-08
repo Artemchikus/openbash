@@ -240,7 +240,16 @@ systemctl enable --now libvirtd
 dnf --enablerepo=centos-openstack-zed,epel,crb -y install openstack-nova-compute
 firewall-cmd --add-port=5900-5999/tcp
 firewall-cmd --runtime-to-permanent
-
+mkdir -p /etc/systemd/system/openstack-nova-compute.service.d/
+cat > /etc/systemd/system/openstack-nova-compute.service.d/override.conf <<EOF
+[Unit]
+After=httpd.service
+EOF
+mkdir -p /etc/systemd/system/openstack-nova-scheduler.service.d/
+cat > /etc/systemd/system/openstack-nova-scheduler.service.d/override.conf <<EOF
+[Unit]
+After=httpd.service
+EOF
 
 #============== NEUTRON ===============
 crudini --set /etc/nova/nova.conf DEFAULT vif_plugging_is_fatal True
@@ -549,3 +558,8 @@ firewall-cmd --runtime-to-permanent
 systemctl enable --now iscsid
 systemctl enable --now target
 crudini --set /etc/nova/nova.conf cinder os_region_name RegionOne
+mkdir -p /etc/systemd/system/iscsid.service.d/
+cat > /etc/systemd/system/iscsid.service.d/override.conf <<EOF
+[Unit]
+After=httpd.service target.service
+EOF

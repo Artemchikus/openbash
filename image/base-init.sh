@@ -243,11 +243,13 @@ firewall-cmd --runtime-to-permanent
 mkdir -p /etc/systemd/system/openstack-nova-compute.service.d/
 cat > /etc/systemd/system/openstack-nova-compute.service.d/override.conf <<EOF
 [Unit]
+Requires=httpd.service
 After=httpd.service
 EOF
 mkdir -p /etc/systemd/system/openstack-nova-scheduler.service.d/
 cat > /etc/systemd/system/openstack-nova-scheduler.service.d/override.conf <<EOF
 [Unit]
+Requires=httpd.service
 After=httpd.service
 EOF
 
@@ -561,5 +563,5 @@ crudini --set /etc/nova/nova.conf cinder os_region_name RegionOne
 mkdir -p /etc/systemd/system/iscsid.service.d/
 cat > /etc/systemd/system/iscsid.service.d/override.conf <<EOF
 [Unit]
-After=httpd.service target.service
+After=httpd.service
 EOF
